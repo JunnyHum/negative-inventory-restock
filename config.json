@@ -1,0 +1,14 @@
+{
+  "paths": {
+    "warehouse_dir": "~/Desktop/淘宝店铺/仓库商品库存表/",
+    "biz_dir": "~/Desktop/淘宝店铺/生意参谋数据/淘宝网红店/",
+    "restock_dir": "~/Desktop/淘宝店铺/生产部补单表/",
+    "output_dir": "~/Desktop/淘宝店铺/归档/"
+  },
+  "file_patterns": {
+    "warehouse": "实体库存_黄之俊",
+    "sg_restock": "SG品牌进度表*.xlsx",
+    "nba_restock": "SG.NBA电商专供订单进度*.xlsx",
+    "biz_advisor": "*生意参谋*.xls*"
+  }
+}
