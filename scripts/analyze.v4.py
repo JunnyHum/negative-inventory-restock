@@ -17,15 +17,13 @@ import glob
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from datetime import datetime, timedelta
-import datetime as dt
 
 CONFIG_PATH = Path(__file__).parent.parent / 'config.json'
 
 DEFAULT_CONFIG = {
     'paths': {
         'warehouse_dir':       '~/Desktop/淘宝店铺/仓库商品库存表/',
-        'biz_root_dir':        '~/Desktop/淘宝店铺/生意参谋数据/',
-        'biz_dir':             '~/Desktop/淘宝店铺/生意参谋数据/淘宝网红店（手动）/',
+        'biz_dir':             '~/Desktop/报表/c1报表/报表数据源/',
         'restock_dir':         '~/Desktop/淘宝店铺/生产部补单表/',
         'output_dir':          '~/Desktop/淘宝店铺/归档/窗口期到货_负库存/',
         'product_table':       '~/Desktop/淘宝店铺/店铺商品表/SG网红店商品表.xlsx',
@@ -36,10 +34,6 @@ DEFAULT_CONFIG = {
         'sg_restock':      'SG品牌进度表*.xlsx',
         'nba_restock':     'SG.NBA电商专供订单进度*.xlsx',
         'biz_advisor':     '*生意参谋*.xls*',
-    },
-    'shop': {
-        'name': 'SG网红店',
-        'biz_keywords': ['网红店', 'sg网红']
     }
 }
 
@@ -53,25 +47,6 @@ logger = logging.getLogger(__name__)
 SIZE_KEYS = ['XS', 'S', 'M', 'L', 'XL', '2XL', '均码']
 SIZE_LAST_MAP = {'4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL', '0': '均码'}
 
-def toInt(v) -> int:
-    """将单元格值安全转换为整数"""
-    if v is None or v == '' or v == '-':
-        return 0
-    return int(str(v).replace(',', ''))
-
-def inferYear(month: int) -> int:
-    """根据当前月份推断日期所属年份，处理跨年场景"""
-    now = datetime.now()
-    currentMonth = now.month
-    year = now.year
-    # 当前11-12月看到1-2月 → 视为明年
-    if currentMonth >= 11 and month <= 2:
-        year += 1
-    # 当前1-2月看到11-12月 → 视为去年
-    elif currentMonth <= 2 and month >= 11:
-        year -= 1
-    return year
-
 def load_config():
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -81,17 +56,26 @@ def load_config():
     paths = config.get('paths', {})
     for key, path in paths.items():
         expanded = os.path.expanduser(path)
-        paths[key] = expanded  # 始终展开 ~，不依赖目录是否已存在
+        if os.path.exists(expanded):
+            paths[key] = expanded
     return config
 
 def get_latest_file(directory, pattern='实体库存_黄之俊'):
     if not os.path.exists(directory):
         return None
-    files = sorted(glob.glob(os.path.join(directory, '*.xlsx')), key=os.path.getmtime, reverse=True)
+    files = sorted(glob.glob(directory + '*.xlsx'), key=os.path.getmtime, reverse=True)
     for f in files:
-        if pattern in os.path.basename(f):
+        if pattern in f:
             return f
     return None  # 不匹配则返回 None，不随意 fallback
+
+def get_latest_inventory_file(dirs_and_patterns):
+    """尝试多个目录+模式组合，返回第一个找到的文件"""
+    for directory, pattern in dirs_and_patterns:
+        f = get_latest_file(directory, pattern)
+        if f:
+            return f
+    return None
 
 def parse_spec_new(spec):
     """
@@ -107,6 +91,13 @@ def parse_spec_new(spec):
     size_last = spec[11]
     size_name = SIZE_LAST_MAP.get(size_last, None)
     return code, color, size_name
+
+def parse_color_name(color_str):
+    """从 [48]藏青 格式提取颜色名"""
+    if not color_str:
+        return ''
+    m = re.search(r'\[?\d+\]?(.+)', str(color_str))
+    return m.group(1).strip() if m else str(color_str).strip()
 
 def parse_size_name_from_text(size_text):
     """从 S(165/78A) 或 S 或 均码 等文本提取尺码名"""
@@ -131,7 +122,7 @@ def excel_serial_to_date(serial):
         serial = int(float(serial))
         if serial >= 60: serial -= 1
         return datetime(1899, 12, 31) + timedelta(days=serial)
-    except (ValueError, TypeError, OverflowError):
+    except:
         return None
 
 def get_date_value(val):
@@ -141,12 +132,10 @@ def get_date_value(val):
         m1 = re.match(r'^(\d+)/(\d+)(?:-(\d+)/(\d+))?$', s)
         if m1:
             groups = m1.groups()
-            month = int(groups[0])
-            year = inferYear(month)
             if groups[2] is not None:  # M/D-M/D 格式
-                return datetime(year, month, int(groups[1]))  # 取范围开始日
+                return datetime(datetime.now().year, int(groups[0]), int(groups[1]))  # 取范围开始日
             else:  # M/D 格式
-                return datetime(year, month, int(groups[1]))
+                return datetime(datetime.now().year, int(groups[0]), int(groups[1]))
         return None
 
     if val is None: return None
@@ -155,91 +144,42 @@ def get_date_value(val):
         return excel_serial_to_date(val)
     s = str(val).strip()
     if not s or s in ['-', 'None', '']: return None
+    current_year = datetime.now().year
     m = re.match(r'^(\d+)/(\d+)-(\d+)$', s)
-    if m:
-        month = int(m.group(1))
-        return datetime(inferYear(month), month, int(m.group(2)))
+    if m: return datetime(current_year, int(m.group(1)), int(m.group(2)))
     m = re.match(r'^(\d+)/(\d+)$', s)
-    if m:
-        month = int(m.group(1))
-        return datetime(inferYear(month), month, int(m.group(2)))
+    if m: return datetime(current_year, int(m.group(1)), int(m.group(2)))
     return None
 
 # ── 库存加载（新格式）───────────────────────────────────────────────────────
-def findWarehouseColumnIndexes(headerCells: list) -> dict:
-    """仓库库存导出表的动态列映射"""
-    indexes = {
-        'productCode': None,  # 商品编码（货号）
-        'specCode': None,     # 规格编码
-        'available': None,    # 可销数
-        'stock': None,        # 库存数（实体）
-        'sizeName': None,     # 尺码
-        'colorName': None,    # 颜色
-    }
-    for idx, cell in enumerate(headerCells):
-        if cell is None:
-            continue
-        val = str(cell).strip()
-        if val == '商品编码':
-            indexes['productCode'] = idx
-        elif val == '规格编码':
-            indexes['specCode'] = idx
-        elif val in ['可销数', '可销']:
-            indexes['available'] = idx
-        elif val in ['库存数', '实体库存', '库存']:
-            indexes['stock'] = idx
-        elif val in ['尺码', '规格']:
-            indexes['sizeName'] = idx
-        elif val == '颜色':
-            indexes['colorName'] = idx
-    return indexes
-
 def load_warehouse(filepath):
     """
     新格式：系统库存导出_黄之俊_*.xlsx
-    支持动态列识别，自动适配商品编码、规格编码、可销数、库存数、尺码、颜色列。
+    列（1-based）：1=商品名称 2=商品编码 3=实体仓编码 4=实体仓名称 5=虚拟仓编码
+                  6=虚拟仓名称 7=仓库类型 8=商品简称 9=规格编码 10=季节
+                  11=可销数 12=库存数 13=采购在途数 14=可用数
     规格编码：货号8位+颜色2位+尺码2位（共12位）
     """
     wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
     ws = wb.active
-    
-    # 读取第一行作为表头
-    first_row = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-    col_indexes = findWarehouseColumnIndexes(first_row)
-    
-    # 必须的核心列
-    if col_indexes['productCode'] is None or col_indexes['specCode'] is None:
-        wb.close()
-        raise ValueError(f"仓库库存表 {filepath} 未识别到关键表头 (商品编码 / 规格编码)")
-        
-    logger.info("新格式库存文件: %s (%d行), 动态列配置: %s", 
-                os.path.basename(filepath), ws.max_row, col_indexes)
+    logger.info("新格式库存文件: %s (%d行)", filepath.split('/')[-1], ws.max_row)
 
     wh_neg_total  = defaultdict(float)   # skc -> 总可销
     wh_neg_size   = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})  # skc -> {尺码: 可销}
-    whEntityTotal = defaultdict(float)   # skc -> 总实体
+    wh实体_total  = defaultdict(float)   # skc -> 总实体
     wh_colors_txt = {}   # skc -> 颜色文字（[48]藏青）
-
-    # 尺码、颜色、可销、库存的列索引
-    code_idx = col_indexes['productCode']
-    spec_idx = col_indexes['specCode']
-    avail_idx = col_indexes['available'] if col_indexes['available'] is not None else 10 # 默认10 (11列)
-    stock_idx = col_indexes['stock'] if col_indexes['stock'] is not None else 11 # 默认11 (12列)
-    size_idx = col_indexes['sizeName'] if col_indexes['sizeName'] is not None else 16 # 默认16 (17列)
-    color_idx = col_indexes['colorName'] if col_indexes['colorName'] is not None else 17 # 默认17 (18列)
+    wh_spec_names = {}   # skc -> 规格编码（用于参考）
 
     for row in ws.iter_rows(min_row=2):
         rd = [c.value for c in row]
-        if len(rd) <= max(code_idx, spec_idx):
-            continue
-            
-        code     = str(rd[code_idx]).strip() if rd[code_idx] else ''
-        spec     = str(rd[spec_idx]).strip() if rd[spec_idx] else ''
-        
-        kexiao   = float(rd[avail_idx]) if len(rd) > avail_idx and rd[avail_idx] is not None else 0.0
-        entity   = float(rd[stock_idx]) if len(rd) > stock_idx and rd[stock_idx] is not None else 0.0
-        size_txt = rd[size_idx] if len(rd) > size_idx else None
-        color_txt = rd[color_idx] if len(rd) > color_idx else None
+        # 取关键列（1-based转0-based已在 rd 索引中）
+        # rd[1]=商品编码 rd[8]=规格编码 rd[10]=可销数 rd[11]=库存数 rd[16]=尺码文字 rd[17]=颜色文字
+        code     = str(rd[1]).strip() if rd[1] else ''
+        spec     = str(rd[8]).strip() if rd[8] else ''
+        kexiao   = float(rd[10]) if rd[10] is not None else 0.0
+        entity   = float(rd[11]) if rd[11] is not None else 0.0
+        size_txt = rd[16]  # 尺码文字 S(165/78A)、均码 等
+        color_txt = rd[17]  # 颜色文字 [48]藏青、[79]黑色 等
 
         if not code or len(spec) < 12:
             continue
@@ -260,31 +200,37 @@ def load_warehouse(filepath):
             wh_colors_txt[skc] = str(color_txt)
 
         wh_neg_total[skc]  += kexiao
-        whEntityTotal[skc]  += entity
+        wh实体_total[skc]  += entity
         if size_name:
             wh_neg_size[skc][size_name] += kexiao
 
     wb.close()
     logger.info("新格式解析: %d个SKC", len(wh_neg_total))
-    return wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt
+    return wh_neg_total, wh_neg_size, wh实体_total, wh_colors_txt
+
 
 # ── 店铺商品表（正价Sheet）───────────────────────────────────────────────────
 def load_product_table(filepath):
-    """加载正价Sheet，返回 {款号: {上架日期}}"""
+    """
+    加载正价Sheet，返回 {款号: {上架日期, 商品状态}}
+    用于判断库存回补是'未来上新'还是'老款回补'
+    """
     if not filepath or not os.path.exists(filepath):
         return {}
     try:
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
-        ws = wb['正价'] if '正价' in wb.sheetnames else wb.active
+        ws = wb['正价']
         result = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            rd = list(row)
-            productCode = str(rd[1]).strip() if rd[1] else ''
-            if not productCode:
+        for r in range(2, ws.max_row + 1):
+            款号 = ws.cell(r, 2).value  # col2=商品编码
+            if not 款号:
                 continue
-            listDate = rd[13] if len(rd) > 13 else None
-            result[productCode] = {
-                '上架日期': listDate,
+            款号 = str(款号).strip()
+            上架日期 = ws.cell(r, 14).value  # col14=上架日期
+            商品状态 = ws.cell(r, 4).value  # col4=商品状态
+            result[款号] = {
+                '上架日期': 上架日期,
+                '商品状态': 商品状态,
             }
         wb.close()
         logger.info("正价表款号: %d个", len(result))
@@ -293,67 +239,13 @@ def load_product_table(filepath):
         logger.warning("加载正价表失败: %s", e)
         return {}
 
-# ── 生意参谋 ─────────────────────────────────────────────────────────────────
-def resolveBizDir(config: dict) -> str:
-    """
-    根据 config 中的店铺关键词，在生意参谋根目录下自动定位对应店铺的数据子目录。
-    优先使用 biz_root_dir + 关键词匹配，若匹配失败则回退到 biz_dir。
-    """
-    paths = config.get('paths', {})
-    rootDir = paths.get('biz_root_dir', '')
-    fallbackDir = paths.get('biz_dir', '')
-    
-    if not rootDir or not os.path.isdir(rootDir):
-        return fallbackDir
-    
-    shopConfig = config.get('shop', {})
-    keywords = shopConfig.get('biz_keywords', [])
-    
-    if not keywords:
-        return fallbackDir
-    
-    # 扫描子目录（包括符号链接）
-    candidates = []
-    try:
-        for entry in os.listdir(rootDir):
-            entryPath = os.path.join(rootDir, entry)
-            if not os.path.isdir(entryPath):
-                continue
-            entryLower = entry.lower()
-            for kw in keywords:
-                if kw.lower() in entryLower:
-                    candidates.append(entryPath)
-                    break
-    except Exception as e:
-        logger.warning("扫描生意参谋根目录失败: %s", e)
-        return fallbackDir
-    
-    if not candidates:
-        logger.warning("生意参谋目录中未匹配到店铺关键词 %s，回退使用 %s", keywords, fallbackDir)
-        return fallbackDir
-    
-    # 多个候选时，优先选择含有生意参谋数据文件的目录
-    for c in candidates:
-        # 检查目录本身或其子目录(如 7日商品数据/) 中是否有匹配文件
-        if glob.glob(os.path.join(c, '**', '*生意参谋*'), recursive=True):
-            logger.info("自动识别生意参谋目录: %s", c)
-            return c
-            
-    logger.info("自动识别生意参谋目录(无数据文件): %s", candidates[0])
-    return candidates[0]
 
+# ── 生意参谋 ─────────────────────────────────────────────────────────────────
 def load_business_data(biz_dir, pattern):
-    """
-    在指定的生意参谋目录下加载最新文件，支持在子目录（如 7日商品数据/ 等）下递归查找
-    """
-    # 递归查找匹配的文件
-    search_path = os.path.join(biz_dir, '**', pattern)
-    files = sorted(glob.glob(search_path, recursive=True), key=os.path.getmtime, reverse=True)
+    files = sorted(glob.glob(biz_dir + pattern), key=os.path.getmtime, reverse=True)
     if not files:
-        logger.info("在 %s 下未找到生意参谋数据", biz_dir)
+        logger.info("未找到生意参谋数据")
         return {}
-        
-    logger.info("加载最新生意参谋文件: %s", files[0])
     try:
         ext = os.path.splitext(files[0])[1].lower()
         prod_data = defaultdict(lambda: {'visitors': 0, 'pv': 0, 'cart': 0, 'orders': 0, 'pay': 0})
@@ -366,11 +258,14 @@ def load_business_data(biz_dir, pattern):
                 row = dict(zip(headers, ws.row_values(row_idx)))
                 code = row.get('货号', '')
                 if not code: continue
-                prod_data[code]['visitors'] += toInt(row.get('商品访客数'))
-                prod_data[code]['pv']       += toInt(row.get('商品浏览量'))
-                prod_data[code]['cart']     += toInt(row.get('商品加购件数'))
-                prod_data[code]['orders']   += toInt(row.get('下单件数'))
-                prod_data[code]['pay']      += toInt(row.get('支付件数'))
+                def to_int(v):
+                    if v in ['', '-', None]: return 0
+                    return int(str(v).replace(',', ''))
+                prod_data[code]['visitors'] += to_int(row.get('商品访客数'))
+                prod_data[code]['pv']       += to_int(row.get('商品浏览量'))
+                prod_data[code]['cart']     += to_int(row.get('商品加购件数'))
+                prod_data[code]['orders']   += to_int(row.get('下单件数'))
+                prod_data[code]['pay']      += to_int(row.get('支付件数'))
         else:
             wb = openpyxl.load_workbook(files[0], data_only=True)
             ws = wb.active
@@ -379,16 +274,20 @@ def load_business_data(biz_dir, pattern):
                 rd = dict(zip(headers, row))
                 code = str(rd.get('货号', '')).strip()
                 if not code: continue
-                prod_data[code]['visitors'] += toInt(rd.get('商品访客数'))
-                prod_data[code]['pv']       += toInt(rd.get('商品浏览量'))
-                prod_data[code]['cart']     += toInt(rd.get('商品加购件数'))
-                prod_data[code]['orders']   += toInt(rd.get('下单件数'))
-                prod_data[code]['pay']      += toInt(rd.get('支付件数'))
+                def to_int(v):
+                    if v is None or v == '' or v == '-': return 0
+                    return int(str(v).replace(',', ''))
+                prod_data[code]['visitors'] += to_int(rd.get('商品访客数'))
+                prod_data[code]['pv']       += to_int(rd.get('商品浏览量'))
+                prod_data[code]['cart']     += to_int(rd.get('商品加购件数'))
+                prod_data[code]['orders']   += to_int(rd.get('下单件数'))
+                prod_data[code]['pay']      += to_int(rd.get('支付件数'))
         logger.info("生意参谋款号: %d", len(prod_data))
         return prod_data
     except Exception as e:
         logger.error("生意参谋读取失败: %s", e)
         return {}
+
 
 def score_and_advise(unmatched_skcs, biz_data):
     """对无翻单负库存进行评分和建议"""
@@ -420,6 +319,7 @@ def score_and_advise(unmatched_skcs, biz_data):
         results[code] = {'score': round(score, 1), 'pay': pay, 'visitors': visitors,
                          'cart': cart, 'advice': advice}
     return results
+
 
 def findColumnIndexes(headerCells: list) -> dict:
     """
@@ -491,43 +391,6 @@ def getHeaderRowAndIndexes(ws) -> tuple[int, dict]:
     first_row = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
     return 1, findColumnIndexes(first_row)
 
-def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
-    """
-    对无精确翻单匹配的负库存 SKC，检查同款号下是否有其他颜色的翻单记录。
-    """
-    approxMatches = []
-    
-    for skc in negSkcs:
-        if skc in skcHasAny:
-            continue
-            
-        code = skc[:8]
-        origColor = skc[8:]
-        
-        # 收集同款号下所有有翻单记录的颜色
-        sameCodeRestockColors = set()
-        for otherSkc in skcHasAny:
-            if otherSkc[:8] == code:
-                sameCodeRestockColors.add(otherSkc[8:])
-        
-        if not sameCodeRestockColors:
-            continue
-            
-        for altColor in sameCodeRestockColors:
-            altSkc = code + altColor
-            # 从 allRestock 中找出替代颜色翻单的记录
-            for (rSkc, actual_date), d in allRestock.items():
-                if rSkc == altSkc:
-                    matchType = '★色号差异：原[{}]→替代[{}]，疑似替代'.format(origColor, altColor)
-                    approxMatches.append({
-                        'origSkc': skc,
-                        'altSkc': altSkc,
-                        'delivery': actual_date,
-                        'matchType': matchType,
-                        'restock_detail': d
-                    })
-    
-    return approxMatches
 
 # ── 主分析 ────────────────────────────────────────────────────────────────────
 def analyze():
@@ -552,7 +415,7 @@ def analyze():
     logger.info("窗口期: %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
 
     # ── 1. 加载当前仓库 ──────────────────────────────────────────────
-    wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt = load_warehouse(wh_file)
+    wh_neg_total, wh_neg_size, wh_entity_total, wh_colors_txt = load_warehouse(wh_file)
 
     # 判断均码款
     product_is_junma = {}
@@ -580,6 +443,7 @@ def analyze():
     logger.info("可销<10的SKC: %d", len(neg_skcs))
 
     # ── 2. 加载前一天的仓库（用于Sheet2库存回补）────────────────────
+    import datetime as dt
     cur_basename = os.path.basename(wh_file)
     cur_date_str = re.search(r'(\d{8})', cur_basename)
     cur_date = None
@@ -593,7 +457,7 @@ def analyze():
     all_wh_files = []
     for d in all_dirs:
         if d:
-            all_wh_files += sorted(glob.glob(os.path.join(d, '*.xlsx')), key=os.path.getmtime, reverse=True)
+            all_wh_files += sorted(glob.glob(d + '*.xlsx'), key=os.path.getmtime, reverse=True)
 
     prev_wh_file = None
     if cur_date:
@@ -603,7 +467,7 @@ def analyze():
             f_date = None
             if f_date_str:
                 f_date = dt.datetime.strptime(f_date_str.group(1), '%Y%m%d').date()
-            if f_date and f_date < cur_date and f != wh_file and '系统库存导出' in f_basename:
+            if f_date and f_date < cur_date and f != wh_file and '系统库存导出' in f:
                 prev_wh_file = f
                 break
 
@@ -614,22 +478,22 @@ def analyze():
         prev_neg_total, prev_neg_size, _, _ = load_warehouse(prev_wh_file)
 
     product_table = load_product_table(paths.get('product_table'))
-    today_date = datetime.now().date()
+    today = datetime.now().date()
 
     sheet2_data = []
     if prev_wh_file:
         for skc, cur_total in wh_neg_total.items():
             prev_total = prev_neg_total.get(skc, 0)
             if prev_total <= 0 and cur_total > 0:
-                productCode = skc[:8]
-                if productCode in product_table:
-                    listDate = product_table[productCode].get('上架日期')
-                    if listDate and hasattr(listDate, 'date') and listDate.date() > today_date:
-                        remark = '自动铺货'
+                款号 = skc[:8]
+                if 款号 in product_table:
+                    上架 = product_table[款号].get('上架日期')
+                    if 上架 and hasattr(上架, 'date') and 上架.date() > today:
+                        备注 = '自动铺货'
                     else:
-                        remark = '开启商品同步'
+                        备注 = '开启商品同步'
                 else:
-                    remark = '新款待上架'
+                    备注 = '新款待上架'
                 sheet2_data.append({
                     'skc': skc,
                     'color': wh_colors_txt.get(skc, ''),
@@ -637,14 +501,14 @@ def analyze():
                     'prev_total': prev_total,
                     'prev_sizes': prev_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS}),
                     'cur_sizes':  wh_neg_size.get(skc,  {k: 0.0 for k in SIZE_KEYS}),
-                    '备注': remark,
+                    '备注': 备注,
                 })
     logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
 
     # ── 3. 加载翻单记录 ──────────────────────────────────────────────
     restock_dir = paths['restock_dir']
-    sg_files = sorted(glob.glob(os.path.join(restock_dir, pats['sg_restock'])), key=os.path.getmtime, reverse=True)
-    nba_files = sorted(glob.glob(os.path.join(restock_dir, pats['nba_restock'])), key=os.path.getmtime, reverse=True)
+    sg_files = sorted(glob.glob(restock_dir + pats['sg_restock']), key=os.path.getmtime, reverse=True)
+    nba_files = sorted(glob.glob(restock_dir + pats['nba_restock']), key=os.path.getmtime, reverse=True)
     if not sg_files:
         raise FileNotFoundError(f"未找到SG品牌进度表")
     nba_file = nba_files[0] if nba_files else None
@@ -798,65 +662,35 @@ def analyze():
             d2 = dict(d)
             d2['delivery'] = actual_date.strftime('%Y-%m-%d')
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
-            d2['isApprox'] = False
             results.append((skc, actual_date, d2))
 
-    # ── 5. 近似颜色匹配（P0 功能） ──────────────────────────────────────
-    approxMatches = findApproxColorMatches(neg_skcs, all_restock, skc_has_any)
-    approx_count = 0
-    for match in approxMatches:
-        deliv = match['delivery']
-        if deliv is None:
-            continue
-        if not isinstance(deliv, datetime):
-            try:
-                deliv = datetime.strptime(str(deliv), '%Y-%m-%d')
-            except (ValueError, TypeError):
-                continue
-        if window_start <= deliv <= window_end:
-            d_alt = match['restock_detail']
-            d2 = dict(d_alt)
-            d2['delivery'] = deliv.strftime('%Y-%m-%d')
-            d2['color'] = wh_colors_txt.get(match['origSkc'], d_alt.get('color', ''))
-            # 备注匹配状态
-            d2['status'] = match['matchType']
-            d2['isApprox'] = True
-            results.append((match['origSkc'], deliv, d2))
-            approx_count += 1
-            
-    if approx_count > 0:
-        logger.info("引入近似颜色匹配行: %d条", approx_count)
-
     results.sort(key=lambda x: (x[2].get('delivery', ''), neg_skcs.get(x[0], 0)))
-    logger.info("窗口期到货(含近似): %d条", len(results))
+    logger.info("窗口期到货: %d条", len(results))
 
-    cutoff = (today - timedelta(days=7)).date()
+    # ── 5. 无翻单负库存 ─────────────────────────────────────────────
+    cutoff = today - timedelta(days=7)
     restock_recent = set()
     for (skc, actual_date), d in all_restock.items():
         if sum(d['sizes'].values()) <= 0: continue
         if actual_date and actual_date.date() >= cutoff:
             restock_recent.add(skc)
-            
-    approxMatchedSkcs = set(m['origSkc'] for m in approxMatches)
 
-    unmatched = {skc: qty for skc, qty in neg_skcs.items() if skc not in restock_recent and skc not in approxMatchedSkcs}
+    unmatched = {skc: qty for skc, qty in neg_skcs.items() if skc not in restock_recent}
     logger.info("无翻单负库存: %d条", len(unmatched))
 
-    # ── 7. 生意参谋评分 ────────────────────────────────────────────────
-    # 生意参谋目录自适应定位
-    biz_dir_resolved = resolveBizDir(config)
-    biz_data = load_business_data(biz_dir_resolved, pats['biz_advisor'])
+    # ── 6. 生意参谋评分 ────────────────────────────────────────────────
+    biz_data = load_business_data(paths['biz_dir'], pats['biz_advisor'])
     scores   = score_and_advise(unmatched, biz_data)
 
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-           paths['output_dir'], sheet2_data, whEntityTotal, product_table
+           paths['output_dir'], sheet2_data, wh_entity_total, product_table
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
-             output_dir, sheet2_data, whEntityTotal, product_table=None):
+             output_dir, sheet2_data, wh_entity_total, product_table=None):
     from datetime import date
     today_str = date.today().strftime('%Y%m%d')
-    out_path  = os.path.join(output_dir, f"窗口期到货_负库存_{today_str}.xlsx")
+    out_path  = f"{output_dir}窗口期到货_负库存_{today_str}.xlsx"
     os.makedirs(output_dir, exist_ok=True)
 
     wb = openpyxl.Workbook()
@@ -885,7 +719,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_total  = neg_skcs.get(skc, 0)
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
-        entity   = whEntityTotal.get(skc, 0)
+        entity   = wh_entity_total.get(skc, 0)
 
         row = [
             skc[:8], skc, wh_color,
@@ -901,17 +735,12 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ]
         ws1.append(row)
         rn = ws1.max_row
-        
-        isApprox = d.get('isApprox', False)
-        if isApprox:
-            fill_color = 'FFF2CC'
-        else:
-            fill_color = 'FCE4D6' if wh_total < 0 else 'DAEFCE'
-            
         for ci in range(1, len(headers1) + 1):
             cell = ws1.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
+            # 背景色：负数→红色提示，正常→绿色
+            fill_color = 'FCE4D6' if wh_total < 0 else 'DAEFCE'
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
     cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 8]
@@ -931,12 +760,13 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
 
+    today_disp = date.today().strftime('%Y-%m-%d')
     for d2 in sheet2_data:
         skc        = d2['skc']
         cur_sizes  = d2['cur_sizes']
         prev_sizes = d2['prev_sizes']
-        entity     = whEntityTotal.get(skc, 0)
-        remark     = d2.get('备注', '')
+        entity     = wh_entity_total.get(skc, 0)
+        备注       = d2.get('备注', '')
         row = [
             skc[:8], skc, d2['color'],
             round(d2['cur_total'], 0), round(entity, 0),
@@ -950,11 +780,12 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(cur_sizes.get('M', 0), 0),  round(cur_sizes.get('L', 0), 0),
             round(cur_sizes.get('XL', 0), 0), round(cur_sizes.get('2XL', 0), 0),
             round(cur_sizes.get('均码', 0), 0),
-            remark,
+            备注,
         ]
         ws2.append(row)
         rn = ws2.max_row
-        fill_color = {'自动铺货': 'DAEFCE', '开启商品同步': 'FFF2CC', '新款待上架': 'D9D9D9'}.get(remark, 'DAEFCE')
+        # 颜色区分：自动铺货=绿色，老款同步=橙色，新款待上架=灰色
+        fill_color = {'自动铺货': 'DAEFCE', '开启商品同步': 'FFF2CC', '新款待上架': 'D9D9D9'}.get(备注, 'DAEFCE')
         for ci in range(1, len(headers2) + 1):
             cell = ws2.cell(rn, ci)
             cell.border = tb
@@ -1008,7 +839,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-        output_dir, sheet2_data, whEntityTotal, product_table = analyze()
+        output_dir, sheet2_data, wh_entity_total, product_table = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
@@ -1016,7 +847,7 @@ if __name__ == '__main__':
 
     if results or unmatched:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
-                        scores, output_dir, sheet2_data, whEntityTotal, product_table)
+                        scores, output_dir, sheet2_data, wh_entity_total, product_table)
         logger.info("完成: 窗口期到货%d条 | 库存回补%d条 | 无翻单%d条",
                     len(results), len(sheet2_data), len(unmatched))
     else:

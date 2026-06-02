@@ -323,9 +323,12 @@ def analyze():
             if size_name:
                 prev_wh_neg_size[skc][size_name] += kexiao
 
-    # Sheet3 库存回补：前一天可销<=0，后一天可销>0 的SKC
+    # Sheet3 库存回补：前一天表里可销<=0，后一天可销>0 的SKC
+    # 注意：款号必须在前一天表格里出现过才算，没出现过则跳过（无法对比）
     sheet3_data = []
     for skc, cur_total in wh_neg_total.items():
+        if skc not in prev_wh_neg_total:
+            continue  # 前一天表格里没有此款号，无法对比
         prev_total = prev_wh_neg_total.get(skc, 0)
         if prev_total <= 0 and cur_total > 0:
             prev_sizes = prev_wh_neg_size.get(skc, {k:0.0 for k in SIZE_KEYS})

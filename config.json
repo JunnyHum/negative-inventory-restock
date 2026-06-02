@@ -1,14 +1,22 @@
 {
   "paths": {
-    "warehouse_dir": "~/Desktop/淘宝店铺/仓库商品库存表/",
-    "biz_dir": "~/Desktop/淘宝店铺/生意参谋数据/淘宝网红店/",
+    "warehouse_dir": "/Users/junny/Desktop/淘宝店铺/仓库商品库存表/",
+    "feishu_inbound": "~/.openclaw/media/inbound/",
+    "biz_root_dir": "/Users/junny/Desktop/淘宝店铺/生意参谋数据/",
+    "biz_dir": "/Users/junny/Desktop/淘宝店铺/生意参谋数据/淘宝网红店（手动）/",
     "restock_dir": "~/Desktop/淘宝店铺/生产部补单表/",
-    "output_dir": "~/Desktop/淘宝店铺/归档/"
+    "output_dir": "~/Desktop/淘宝店铺/归档/窗口期到货_负库存/",
+    "product_table": "/Users/junny/Desktop/淘宝店铺/店铺商品表/SG网红店商品表.xlsx"
   },
   "file_patterns": {
-    "warehouse": "实体库存_黄之俊",
+    "warehouse": "系统库存导出_",
     "sg_restock": "SG品牌进度表*.xlsx",
     "nba_restock": "SG.NBA电商专供订单进度*.xlsx",
-    "biz_advisor": "*生意参谋*.xls*"
+    "biz_advisor": "*生意参谋*.xls*",
+    "product_table": "SG网红店商品表"
+  },
+  "shop": {
+    "name": "SG网红店",
+    "biz_keywords": ["网红店", "sg网红"]
   }
 }
