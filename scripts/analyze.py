@@ -7,6 +7,7 @@
 """
 import openpyxl
 import argparse
+import sys
 import json
 import logging
 from collections import defaultdict
@@ -357,9 +358,10 @@ def load_business_data(biz_dir, pattern):
     try:
         ext = os.path.splitext(files[0])[1].lower()
         prod_data = defaultdict(lambda: {'visitors': 0, 'pv': 0, 'cart': 0, 'orders': 0, 'pay': 0})
-        if ext == '.xls':
+
+        def read_with_xlrd(fpath):
             import xlrd
-            wb = xlrd.open_workbook(files[0])
+            wb = xlrd.open_workbook(fpath)
             ws = wb.sheet_by_index(0)
             headers = ws.row_values(4)
             for row_idx in range(5, ws.nrows):
@@ -371,19 +373,29 @@ def load_business_data(biz_dir, pattern):
                 prod_data[code]['cart']     += toInt(row.get('商品加购件数'))
                 prod_data[code]['orders']   += toInt(row.get('下单件数'))
                 prod_data[code]['pay']      += toInt(row.get('支付件数'))
+
+        if ext == '.xls':
+            read_with_xlrd(files[0])
         else:
-            wb = openpyxl.load_workbook(files[0], data_only=True)
-            ws = wb.active
-            headers = [str(c.value) if c.value else '' for c in ws[4]]
-            for row in ws.iter_rows(min_row=5, values_only=True):
-                rd = dict(zip(headers, row))
-                code = str(rd.get('货号', '')).strip()
-                if not code: continue
-                prod_data[code]['visitors'] += toInt(rd.get('商品访客数'))
-                prod_data[code]['pv']       += toInt(rd.get('商品浏览量'))
-                prod_data[code]['cart']     += toInt(rd.get('商品加购件数'))
-                prod_data[code]['orders']   += toInt(rd.get('下单件数'))
-                prod_data[code]['pay']      += toInt(rd.get('支付件数'))
+            try:
+                wb = openpyxl.load_workbook(files[0], data_only=True)
+                ws = wb.active
+                headers = [str(c.value) if c.value else '' for c in ws[4]]
+                for row in ws.iter_rows(min_row=5, values_only=True):
+                    rd = dict(zip(headers, row))
+                    code = str(rd.get('货号', '')).strip()
+                    if not code: continue
+                    prod_data[code]['visitors'] += toInt(rd.get('商品访客数'))
+                    prod_data[code]['pv']       += toInt(rd.get('商品浏览量'))
+                    prod_data[code]['cart']     += toInt(rd.get('商品加购件数'))
+                    prod_data[code]['orders']   += toInt(rd.get('下单件数'))
+                    prod_data[code]['pay']      += toInt(rd.get('支付件数'))
+            except Exception as openpyxl_err:
+                if "zip file" in str(openpyxl_err).lower():
+                    logger.warning("该 xlsx 文件并非标准的 zip 格式 (可能是伪装的旧版 xls CDFV2)，尝试使用 xlrd 引擎重新解析...")
+                    read_with_xlrd(files[0])
+                else:
+                    raise openpyxl_err
         logger.info("生意参谋款号: %d", len(prod_data))
         return prod_data
     except Exception as e:
@@ -491,9 +503,55 @@ def getHeaderRowAndIndexes(ws) -> tuple[int, dict]:
     first_row = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
     return 1, findColumnIndexes(first_row)
 
+# ── 色系分组（2026-06-04 完整版:从商品资料.基础信息 提取 11 系 100 色）──────────
+# 不同色系是不同 SKU,不能互相替代。
+COLOR_FAMILY = {
+    # 白色系 (00-04): 透明/银/米白/本白/奶白
+    '00': '白色系', '01': '白色系', '02': '白色系', '03': '白色系', '04': '白色系',
+    # 杏卡色系 (05-09): 灰白/杏/卡其/沙/暖烟灰
+    '05': '杏卡色系', '06': '杏卡色系', '07': '杏卡色系', '08': '杏卡色系', '09': '杏卡色系',
+    # 黄色系 (10-19): 杏白/金/黄/橘粉/芥黄/柠檬黄/中黄/米色/暗金/土黄
+    '10': '黄色系', '11': '黄色系', '12': '黄色系', '13': '黄色系', '14': '黄色系',
+    '15': '黄色系', '16': '黄色系', '17': '黄色系', '18': '黄色系', '19': '黄色系',
+    # 灰色系 (20-29): 银灰/浅灰/灰/中灰/深灰/浅紫灰/深紫灰/浅花灰/花灰/深花灰
+    '20': '灰色系', '21': '灰色系', '22': '灰色系', '23': '灰色系', '24': '灰色系',
+    '25': '灰色系', '26': '灰色系', '27': '灰色系', '28': '灰色系', '29': '灰色系',
+    # 绿色系 (30-39): 浅水绿/湖绿/浅绿/绿/草绿/灰绿/深绿/军绿/茶绿/墨绿
+    '30': '绿色系', '31': '绿色系', '32': '绿色系', '33': '绿色系', '34': '绿色系',
+    '35': '绿色系', '36': '绿色系', '37': '绿色系', '38': '绿色系', '39': '绿色系',
+    # 蓝色系 (40-49): 浅水蓝/湖蓝/深湖蓝/浅蓝/中蓝/灰蓝/宝蓝/深蓝/藏青/牛仔蓝
+    '40': '蓝色系', '41': '蓝色系', '42': '蓝色系', '43': '蓝色系', '44': '蓝色系',
+    '45': '蓝色系', '46': '蓝色系', '47': '蓝色系', '48': '蓝色系', '49': '蓝色系',
+    # 紫色系 (50-59): 浅紫/粉紫/紫/蓝紫/深紫/丁香紫/黑紫/亮紫/茄紫/紫红
+    '50': '紫色系', '51': '紫色系', '52': '紫色系', '53': '紫色系', '54': '紫色系',
+    '55': '紫色系', '56': '紫色系', '57': '紫色系', '58': '紫色系', '59': '紫色系',
+    # 红色系 (60-69): 粉红/桃红/大红/藕粉红/暗红/粉金/橙/橙红/酒红/玫红
+    '60': '红色系', '61': '红色系', '62': '红色系', '63': '红色系', '64': '红色系',
+    '65': '红色系', '66': '红色系', '67': '红色系', '68': '红色系', '69': '红色系',
+    # 咖黑色系 (70-79): 浅咖/灰褐/古铜/深咖/棕/深褐/红褐/黑金/瓦黑/黑
+    '70': '咖黑色系', '71': '咖黑色系', '72': '咖黑色系', '73': '咖黑色系', '74': '咖黑色系',
+    '75': '咖黑色系', '76': '咖黑色系', '77': '咖黑色系', '78': '咖黑色系', '79': '咖黑色系',
+    # 反光色系 (80-89): 反光银/金/绿/蓝/紫/红/黑 + 反光一二三
+    '80': '反光色系', '81': '反光色系', '82': '反光色系', '83': '反光色系', '84': '反光色系',
+    '85': '反光色系', '86': '反光色系', '87': '反光色系', '88': '反光色系', '89': '反光色系',
+    # 格子系 (90-99): 豹纹/蛇纹/花色/格子绿/蓝/紫/红/黑/格子多色1/2
+    '90': '格子系', '91': '格子系', '92': '格子系', '93': '格子系', '94': '格子系',
+    '95': '格子系', '96': '格子系', '97': '格子系', '98': '格子系', '99': '格子系',
+}
+
+
+def _colorFamily(colorCode):
+    """返回色系名。未知色号返回 None (拒绝近似匹配)。"""
+    # 去掉可能的 [xx] 前缀
+    if colorCode and colorCode.startswith('['):
+        return None  # 异常色号格式,保守跳过
+    return COLOR_FAMILY.get(colorCode)
+
+
 def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
     """
-    对无精确翻单匹配的负库存 SKC，检查同款号下是否有其他颜色的翻单记录。
+    对无精确翻单匹配的负库存 SKC，检查同款号下是否有同色系其他颜色的翻单记录。
+    只有同色系才认为可近似（玫红[69]、沙色[08] 与本白[03] 不属于同色系，不应误判替代）。
     """
     approxMatches = []
     
@@ -503,6 +561,11 @@ def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
             
         code = skc[:8]
         origColor = skc[8:]
+        origFamily = _colorFamily(origColor)
+        
+        # 原色号不在官方色系映射内 → 保守拒绝近似匹配
+        if origFamily is None:
+            continue
         
         # 收集同款号下所有有翻单记录的颜色
         sameCodeRestockColors = set()
@@ -510,15 +573,17 @@ def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
             if otherSkc[:8] == code:
                 sameCodeRestockColors.add(otherSkc[8:])
         
-        if not sameCodeRestockColors:
+        # 严格过滤：只保留同色系的色号
+        sameFamilyColors = {c for c in sameCodeRestockColors if _colorFamily(c) == origFamily}
+        if not sameFamilyColors:
             continue
             
-        for altColor in sameCodeRestockColors:
+        for altColor in sameFamilyColors:
             altSkc = code + altColor
-            # 从 allRestock 中找出替代颜色翻单的记录
+            # 从 allRestock 中找出同色系替代颜色翻单的记录
             for (rSkc, actual_date), d in allRestock.items():
                 if rSkc == altSkc:
-                    matchType = '★色号差异：原[{}]→替代[{}]，疑似替代'.format(origColor, altColor)
+                    matchType = '★色号差异(同色系):原[{}]→参考[{}]'.format(origColor, altColor)
                     approxMatches.append({
                         'origSkc': skc,
                         'altSkc': altSkc,
@@ -541,6 +606,43 @@ def analyze():
         get_latest_file(paths.get('warehouse_dir') or '', pats['warehouse']) or
         get_latest_file(paths.get('feishu_inbound') or '', pats['warehouse'])
     )
+    
+    # 检测最新库存文件是否是今天的
+    need_download_wh = False
+    today_date_str = datetime.now().strftime('%Y%m%d')
+    if not wh_file:
+        logger.info("未找到任何仓库库存文件，判定需要下载今天最新数据")
+        need_download_wh = True
+    else:
+        # 检测文件名中是否包含今天的日期
+        if today_date_str not in os.path.basename(wh_file):
+            logger.info("最新仓库文件 %s 不是今天的，准备自动拉取今天最新数据", os.path.basename(wh_file))
+            need_download_wh = True
+
+    if need_download_wh:
+        logger.info("⚡ 触发自动拉取今天最新 Jeoms 仓库库存数据流程...")
+        try:
+            # 找到 jeoms-inventory 技能脚本的路径
+            jeoms_script_path = Path(__file__).parent.parent.parent / 'jeoms-inventory' / 'main.py'
+            if jeoms_script_path.exists():
+                import subprocess
+                cmd = [sys.executable, str(jeoms_script_path)]
+                logger.info("运行命令: %s", " ".join(cmd))
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode == 0:
+                    logger.info("✓ 自动拉取今天最新库存数据成功")
+                    # 重新获取最新的库存文件路径
+                    wh_file = (
+                        get_latest_file(paths.get('warehouse_dir') or '', pats['warehouse']) or
+                        get_latest_file(paths.get('feishu_inbound') or '', pats['warehouse'])
+                    )
+                else:
+                    logger.error("❌ 自动拉取今日库存数据失败: %s\n%s", res.stdout, res.stderr)
+            else:
+                logger.error("未找到 jeoms-inventory 下载脚本: %s", jeoms_script_path)
+        except Exception as dl_err:
+            logger.error("自动触发下载仓库库存数据异常: %s", dl_err)
+
     if not wh_file:
         raise FileNotFoundError("未找到仓库库存文件，请确认数据源路径")
     logger.info("仓库文件: %s", wh_file)

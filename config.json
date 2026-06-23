@@ -3,7 +3,7 @@
     "warehouse_dir": "/Users/junny/Desktop/淘宝店铺/仓库商品库存表/",
     "feishu_inbound": "~/.openclaw/media/inbound/",
     "biz_root_dir": "/Users/junny/Desktop/淘宝店铺/生意参谋数据/",
-    "biz_dir": "/Users/junny/Desktop/淘宝店铺/生意参谋数据/淘宝网红店（手动）/",
+    "biz_dir": "/Users/junny/Desktop/淘宝店铺/生意参谋数据/淘宝sg网红店/7日商品数据/",
     "restock_dir": "~/Desktop/淘宝店铺/生产部补单表/",
     "output_dir": "~/Desktop/淘宝店铺/归档/窗口期到货_负库存/",
     "product_table": "/Users/junny/Desktop/淘宝店铺/店铺商品表/SG网红店商品表.xlsx"
@@ -17,6 +17,6 @@
   },
   "shop": {
     "name": "SG网红店",
-    "biz_keywords": ["网红店", "sg网红"]
+    "biz_keywords": ["淘宝sg网红店", "sg网红店", "c2店"]
   }
 }
