@@ -1063,6 +1063,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 8]
     for ci, w in enumerate(cw1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
+    ws1.freeze_panes = 'A2'
+    ws1.auto_filter.ref = f"A1:{get_column_letter(ws1.max_column)}{ws1.max_row}"
 
     # ── Sheet2: 库存回补 ─────────────────────────────────────────────
     ws2 = wb.create_sheet('库存回补')
@@ -1110,6 +1112,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
+    ws2.freeze_panes = 'A2'
+    ws2.auto_filter.ref = f"A1:{get_column_letter(ws2.max_column)}{ws2.max_row}"
 
     # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
     ws3 = wb.create_sheet('无翻单需评分')
@@ -1142,6 +1146,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     cw3 = [10, 14, 10, 10, 10, 10, 10, 16]
     for ci, w in enumerate(cw3, 1):
         ws3.column_dimensions[get_column_letter(ci)].width = w
+    ws3.freeze_panes = 'A2'
+    ws3.auto_filter.ref = f"A1:{get_column_letter(ws3.max_column)}{ws3.max_row}"
 
     wb.save(out_path)
     logger.info("已保存: %s", out_path)
