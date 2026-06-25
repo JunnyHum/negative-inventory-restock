@@ -625,6 +625,154 @@ def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
     
     return approxMatches
 
+
+def parse_individual_restock_file(filepath):
+    """
+    解析独立的行格式翻单表（例如 SG26年电商款翻单XXXX.xlsx）。
+    表格式为一行一个 SKU（12位规格），包含尺码和颜色列，并使用 Forward Fill 自动向下填充日期。
+    """
+    logger.info("解析独立翻单表: %s", os.path.basename(filepath))
+    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    records = []
+    
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        
+        # 1. 寻找表头行
+        header_row = None
+        for r in range(1, 15):
+            row_cells = [cell.value for cell in next(ws.iter_rows(min_row=r, max_row=r))]
+            if not any(row_cells):
+                continue
+            row_str = [str(x).strip() for x in row_cells if x is not None]
+            if any('款号' in s for s in row_str) and any('颜色' in s for s in row_str):
+                header_row = r
+                break
+                
+        if not header_row:
+            continue
+            
+        header = [cell.value for cell in next(ws.iter_rows(min_row=header_row, max_row=header_row))]
+        
+        # 2. 定位关键列
+        indexes = {
+            'code': None, 'spec': None, 'color': None, 'size': None,
+            'qty': None, 'delivery': None, 'factory': None, 'status': None,
+        }
+        
+        for idx, cell in enumerate(header):
+            if cell is None: continue
+            val = str(cell).strip().lower().replace('\n', '')
+            if val == '款号':
+                indexes['code'] = idx
+            elif val in ['条码', '规格编码']:
+                indexes['spec'] = idx
+            elif val == '颜色':
+                indexes['color'] = idx
+            elif val == '尺码':
+                indexes['size'] = idx
+            elif val in ['下单', '下单数', '翻单数', '翻单数量']:
+                indexes['qty'] = idx
+            elif val in ['到货时间', '货期', '交货期']:
+                indexes['delivery'] = idx
+            elif val == '工厂':
+                indexes['factory'] = idx
+            elif val in ['生产部', '备注', '状态']:
+                indexes['status'] = idx
+
+        # 兜底匹配 qty 列
+        if indexes['qty'] is None:
+            for idx, cell in enumerate(header):
+                if cell is None: continue
+                val = str(cell).strip().lower().replace('\n', '')
+                if '下单' in val:
+                    indexes['qty'] = idx
+                    break
+                    
+        if indexes['code'] is None or indexes['color'] is None or indexes['size'] is None:
+            continue
+            
+        last_skc = None
+        last_delivery = None
+        last_factory = ''
+        last_status = ''
+        
+        # 3. 遍历行
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            rd = list(row)
+            if len(rd) <= max(indexes['code'], indexes['color'], indexes['size']):
+                continue
+                
+            pc = str(rd[indexes['code']]).strip() if rd[indexes['code']] else ''
+            if not pc or pc == 'None':
+                continue
+                
+            color = str(rd[indexes['color']]) if rd[indexes['color']] else ''
+            mc = re.search(r'\[(\d+)\]', color)
+            cc = mc.group(1) if mc else '?'
+            skc = pc + cc
+            
+            size_raw = rd[indexes['size']]
+            size_name = parse_size_name_from_text(size_raw)
+            if not size_name:
+                continue
+                
+            qty_val = 0
+            if indexes['qty'] is not None and len(rd) > indexes['qty']:
+                v = rd[indexes['qty']]
+                if isinstance(v, (int, float)):
+                    qty_val = float(v)
+                    
+            if qty_val <= 0:
+                continue
+                
+            delivery_date = None
+            if indexes['delivery'] is not None and len(rd) > indexes['delivery']:
+                delivery_date = get_date_value(rd[indexes['delivery']])
+                
+            factory = ''
+            if indexes['factory'] is not None and len(rd) > indexes['factory']:
+                factory = str(rd[indexes['factory']]) if rd[indexes['factory']] else ''
+                
+            status = ''
+            if indexes['status'] is not None and len(rd) > indexes['status']:
+                status = str(rd[indexes['status']]) if rd[indexes['status']] else ''
+                
+            # Forward Fill 向下填充
+            if skc == last_skc:
+                if delivery_date is None:
+                    delivery_date = last_delivery
+                else:
+                    last_delivery = delivery_date
+                    
+                if not factory:
+                    factory = last_factory
+                else:
+                    last_factory = factory
+                    
+                if not status:
+                    status = last_status
+                else:
+                    last_status = status
+            else:
+                last_skc = skc
+                last_delivery = delivery_date
+                last_factory = factory
+                last_status = status
+                
+            records.append({
+                'skc': skc,
+                'size': size_name,
+                'qty': qty_val,
+                'delivery': delivery_date,
+                'factory': factory,
+                'status': status
+            })
+            
+    wb.close()
+    return records
+
+
 # ── 主分析 ────────────────────────────────────────────────────────────────────
 def analyze():
     config = load_config()
@@ -926,6 +1074,74 @@ def analyze():
                 if skc: 
                     skc_has_any.add(skc)
         wb2.close()
+
+    # ── 3.5 扫描并加载独立翻单表 ──────────────────────────────────────
+    try:
+        restock_dir = '/Users/junny/Desktop/淘宝店铺/生产部补单表/'
+        pattern = os.path.join(restock_dir, "*翻单*.xlsx")
+        candidates = glob.glob(pattern)
+        
+        def get_group_key(filename):
+            m = re.search(r'[\(（]([^\(\)（）]+)[\)）]', filename)
+            if m:
+                return m.group(1).strip()
+            base = os.path.splitext(filename)[0]
+            base_clean = re.sub(r'\d+', '', base).replace('翻单', '').replace('电商款', '').replace('年', '').replace(' ', '')
+            return base_clean or 'default'
+
+        groups = {}
+        for filepath in candidates:
+            basename = os.path.basename(filepath)
+            if basename.startswith('~$') or basename.startswith('.~'):
+                continue
+            gk = get_group_key(basename)
+            mtime = os.path.getmtime(filepath)
+            if gk not in groups or mtime > groups[gk]['mtime']:
+                groups[gk] = {
+                    'path': filepath,
+                    'mtime': mtime
+                }
+
+        logger.info("自动识别出独立翻单表分组：")
+        for gk, info in groups.items():
+            logger.info("  分组【%s】最新的文件: %s (修改时间: %s)", 
+                        gk, os.path.basename(info['path']), 
+                        datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M:%S'))
+            
+            try:
+                records = parse_individual_restock_file(info['path'])
+                logger.info("  从 %s 中解析出 %d 条翻单记录", os.path.basename(info['path']), len(records))
+                for r in records:
+                    skc = r['skc']
+                    delivery_date = r['delivery']
+                    if delivery_date is None:
+                        continue
+                    
+                    key = (skc, delivery_date)
+                    if key not in all_restock:
+                        all_restock[key] = {
+                            'sizes': {k: 0 for k in SIZE_KEYS},
+                            'color': '',
+                            'status': '',
+                            'factory': ''
+                        }
+                    
+                    sz = r['size']
+                    if sz in all_restock[key]['sizes']:
+                        all_restock[key]['sizes'][sz] += r['qty']
+                    
+                    if r['status']:
+                        all_restock[key]['status'] = str(r['status'])[:30]
+                    if r['factory']:
+                        all_restock[key]['factory'] = str(r['factory'])
+                    
+                    if skc:
+                        skc_has_any.add(skc)
+            except Exception as ex:
+                logger.error("  解析独立翻单表 %s 失败: %s", os.path.basename(info['path']), ex)
+                
+    except Exception as e:
+        logger.error("扫描独立翻单表失败: %s", e)
 
     logger.info("翻单记录: %d条", len(all_restock))
 
