@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
         'restock_dir':         '~/Desktop/淘宝店铺/生产部补单表/',
         'output_dir':          '~/Desktop/淘宝店铺/归档/窗口期到货_负库存/',
         'product_table':       '~/Desktop/淘宝店铺/店铺商品表/SG网红店商品表.xlsx',
+        'wechat_file_dir':     '/Users/junny/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_iqz0imhyx4m812_8da3/msg/file',
     },
     'file_patterns': {
         'warehouse':       '系统库存导出_',
@@ -1077,10 +1078,41 @@ def analyze():
 
     # ── 3.5 扫描并加载独立翻单表 ──────────────────────────────────────
     try:
-        restock_dir = '/Users/junny/Desktop/淘宝店铺/生产部补单表/'
-        pattern = os.path.join(restock_dir, "*翻单*.xlsx")
-        candidates = glob.glob(pattern)
+        desktop_dir = os.path.expanduser(paths.get('restock_dir') or '/Users/junny/Desktop/淘宝店铺/生产部补单表/')
+        wechat_dir = os.path.expanduser(paths.get('wechat_file_dir') or '/Users/junny/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_iqz0imhyx4m812_8da3/msg/file')
         
+        candidates = []
+        candidates += glob.glob(os.path.join(desktop_dir, "*翻单*.xlsx"))
+        if os.path.exists(wechat_dir):
+            candidates += glob.glob(os.path.join(wechat_dir, "**", "*翻单*.xlsx"), recursive=True)
+            
+        now = datetime.now()
+        now_year, now_week, _ = now.isocalendar()
+        
+        def is_file_in_current_week(filepath):
+            filename = os.path.basename(filepath)
+            file_date = None
+            
+            # 尝试从文件名提取 4 位数日期
+            m = re.search(r'\d{4}', filename)
+            if m:
+                date_str = m.group(0)
+                try:
+                    month = int(date_str[:2])
+                    day = int(date_str[2:])
+                    year = now.year
+                    file_date = datetime(year, month, day)
+                except ValueError:
+                    pass
+            
+            if file_date is None:
+                # 提取失败时使用文件修改时间兜底
+                mtime = os.path.getmtime(filepath)
+                file_date = datetime.fromtimestamp(mtime)
+                
+            file_year, file_week, _ = file_date.isocalendar()
+            return (file_year == now_year) and (file_week == now_week)
+
         def get_group_key(filename):
             m = re.search(r'[\(（]([^\(\)（）]+)[\)）]', filename)
             if m:
@@ -1090,10 +1122,18 @@ def analyze():
             return base_clean or 'default'
 
         groups = {}
+        filtered_count = 0
         for filepath in candidates:
             basename = os.path.basename(filepath)
             if basename.startswith('~$') or basename.startswith('.~'):
                 continue
+                
+            # 1. 过滤：只保留本自然周的数据
+            if not is_file_in_current_week(filepath):
+                filtered_count += 1
+                continue
+                
+            # 2. 分组并取最新
             gk = get_group_key(basename)
             mtime = os.path.getmtime(filepath)
             if gk not in groups or mtime > groups[gk]['mtime']:
@@ -1102,7 +1142,10 @@ def analyze():
                     'mtime': mtime
                 }
 
-        logger.info("自动识别出独立翻单表分组：")
+        if filtered_count > 0:
+            logger.info("自动过滤掉 %d 个历史周的独立翻单文件", filtered_count)
+
+        logger.info("自动识别出当周独立翻单表分组：")
         for gk, info in groups.items():
             logger.info("  分组【%s】最新的文件: %s (修改时间: %s)", 
                         gk, os.path.basename(info['path']), 
