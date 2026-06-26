@@ -718,15 +718,6 @@ def parse_individual_restock_file(filepath):
             if not size_name:
                 continue
                 
-            qty_val = 0
-            if indexes['qty'] is not None and len(rd) > indexes['qty']:
-                v = rd[indexes['qty']]
-                if isinstance(v, (int, float)):
-                    qty_val = float(v)
-                    
-            if qty_val <= 0:
-                continue
-                
             delivery_date = None
             if indexes['delivery'] is not None and len(rd) > indexes['delivery']:
                 delivery_date = get_date_value(rd[indexes['delivery']])
@@ -739,7 +730,13 @@ def parse_individual_restock_file(filepath):
             if indexes['status'] is not None and len(rd) > indexes['status']:
                 status = str(rd[indexes['status']]) if rd[indexes['status']] else ''
                 
-            # Forward Fill 向下填充
+            qty_val = 0
+            if indexes['qty'] is not None and len(rd) > indexes['qty']:
+                v = rd[indexes['qty']]
+                if isinstance(v, (int, float)):
+                    qty_val = float(v)
+                    
+            # Forward Fill 向下填充 (需在过滤下单数量之前执行，以保证合并单元格的交期状态正常传递)
             if skc == last_skc:
                 if delivery_date is None:
                     delivery_date = last_delivery
@@ -760,6 +757,9 @@ def parse_individual_restock_file(filepath):
                 last_delivery = delivery_date
                 last_factory = factory
                 last_status = status
+                
+            if qty_val <= 0:
+                continue
                 
             records.append({
                 'skc': skc,
@@ -1114,12 +1114,27 @@ def analyze():
             return (file_year == now_year) and (file_week == now_week)
 
         def get_group_key(filename):
+            # 1. 提取负责人
+            owner = 'default'
             m = re.search(r'[\(（]([^\(\)（）]+)[\)）]', filename)
             if m:
-                return m.group(1).strip()
-            base = os.path.splitext(filename)[0]
-            base_clean = re.sub(r'\d+', '', base).replace('翻单', '').replace('电商款', '').replace('年', '').replace(' ', '')
-            return base_clean or 'default'
+                owner = m.group(1).strip()
+                
+            # 2. 提取品牌 (SG / NBA)
+            brand = 'unknown'
+            filename_upper = filename.upper()
+            if 'SG' in filename_upper:
+                brand = 'SG'
+            elif 'NBA' in filename_upper:
+                brand = 'NBA'
+            else:
+                base = os.path.splitext(filename)[0]
+                base_clean = re.sub(r'[\(（].*?[\)）]', '', base)
+                base_clean = re.sub(r'\d+', '', base_clean)
+                base_clean = base_clean.replace('翻单', '').replace('电商款', '').replace('年', '').replace(' ', '')
+                brand = base_clean or 'default'
+                
+            return f"{brand}_{owner}"
 
         groups = {}
         filtered_count = 0
