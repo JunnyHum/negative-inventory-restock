@@ -454,13 +454,13 @@ def score_and_advise(unmatched_skcs, biz_data):
                          'cart': cart, 'advice': advice}
     return results
 
-def has_skc_stock(skc, sizes, tw011_avail, is_junma):
-    """判断某个 SKC 在某天是否有库存（总可销 > 0 或 独享仓可销数 > 0）"""
+def has_skc_stock(skc, sizes, is_junma):
+    """判断某个 SKC 在某天是否有库存（仅以总仓可销 > 0 为准）"""
     if is_junma:
-        return (sizes.get('均码', 0) > 0) or (tw011_avail.get('均码', 0) > 0)
+        return (sizes.get('均码', 0) > 0)
     else:
         for s in ['S', 'M', 'L', 'XL', '2XL']:
-            if (sizes.get(s, 0) > 0) or (tw011_avail.get(s, 0) > 0):
+            if (sizes.get(s, 0) > 0):
                 return True
         return False
 
@@ -850,14 +850,12 @@ def analyze():
         is_junma = product_is_junma.get(code, False)
         sizes   = wh_neg_size.get(skc, {})
         if is_junma:
-            has_tw011_stock = (wh_tw011_avail[skc].get('均码', 0) > 0)
-            if not has_tw011_stock and sizes.get('均码', 0) < 10:
+            if sizes.get('均码', 0) < 10:
                 neg_skcs[skc] = qty
         else:
             has_neg_size = False
             for s in ['S', 'M', 'L', 'XL', '2XL']:
-                has_tw011_stock = (wh_tw011_avail[skc].get(s, 0) > 0)
-                if not has_tw011_stock and sizes.get(s, 0) < 10:
+                if sizes.get(s, 0) < 10:
                     has_neg_size = True
                     break
             if has_neg_size:
@@ -913,8 +911,8 @@ def analyze():
             prev_sizes = prev_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
             cur_sizes = wh_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
             
-            yesterday_has_stock = has_skc_stock(skc, prev_sizes, prev_tw011_avail[skc], is_junma)
-            today_has_stock = has_skc_stock(skc, cur_sizes, wh_tw011_avail[skc], is_junma)
+            yesterday_has_stock = has_skc_stock(skc, prev_sizes, is_junma)
+            today_has_stock = has_skc_stock(skc, cur_sizes, is_junma)
             
             if not yesterday_has_stock and today_has_stock:
                 productCode = skc[:8]
