@@ -388,35 +388,74 @@ def load_business_data(biz_dir, pattern):
         
     logger.info("加载最新生意参谋文件: %s", files[0])
     try:
-        ext = os.path.splitext(files[0])[1].lower()
         prod_data = defaultdict(lambda: {'visitors': 0, 'pv': 0, 'cart': 0, 'orders': 0, 'pay': 0})
-        if ext == '.xls':
+        
+        is_xls = False
+        try:
+            # 1. 尝试用 openpyxl 打开 (xlsx)
+            wb = openpyxl.load_workbook(files[0], data_only=True, read_only=True)
+            ws = wb.active
+            
+            # 自动定位表头行
+            header_row_idx = None
+            headers = []
+            row_idx = 0
+            for row in ws.iter_rows(values_only=True):
+                row_idx += 1
+                if row_idx > 15: break
+                row_str = [str(x).strip() for x in row if x is not None]
+                if '货号' in row_str:
+                    header_row_idx = row_idx
+                    headers = [str(x).strip() if x is not None else '' for x in row]
+                    break
+                    
+            if header_row_idx is not None:
+                row_idx = 0
+                for row in ws.iter_rows(values_only=True):
+                    row_idx += 1
+                    if row_idx <= header_row_idx:
+                        continue
+                    rd = dict(zip(headers, row))
+                    code = str(rd.get('货号', '')).strip()
+                    if not code or code == 'None' or code == '-': continue
+                    prod_data[code]['visitors'] += toInt(rd.get('商品访客数'))
+                    prod_data[code]['pv']       += toInt(rd.get('商品浏览量'))
+                    prod_data[code]['cart']     += toInt(rd.get('商品加购件数'))
+                    prod_data[code]['orders']   += toInt(rd.get('下单件数'))
+                    prod_data[code]['pay']      += toInt(rd.get('支付件数'))
+            wb.close()
+        except Exception as ex:
+            logger.info("openpyxl 打开生意参谋失败（可能是 xls 格式），将尝试 xlrd 打开。错误: %s", ex)
+            is_xls = True
+            
+        # 2. 降级使用 xlrd 打开 (xls)
+        if is_xls:
             import xlrd
             wb = xlrd.open_workbook(files[0])
             ws = wb.sheet_by_index(0)
-            headers = ws.row_values(4)
-            for row_idx in range(5, ws.nrows):
-                row = dict(zip(headers, ws.row_values(row_idx)))
-                code = row.get('货号', '')
-                if not code: continue
-                prod_data[code]['visitors'] += toInt(row.get('商品访客数'))
-                prod_data[code]['pv']       += toInt(row.get('商品浏览量'))
-                prod_data[code]['cart']     += toInt(row.get('商品加购件数'))
-                prod_data[code]['orders']   += toInt(row.get('下单件数'))
-                prod_data[code]['pay']      += toInt(row.get('支付件数'))
-        else:
-            wb = openpyxl.load_workbook(files[0], data_only=True)
-            ws = wb.active
-            headers = [str(c.value) if c.value else '' for c in ws[4]]
-            for row in ws.iter_rows(min_row=5, values_only=True):
-                rd = dict(zip(headers, row))
-                code = str(rd.get('货号', '')).strip()
-                if not code: continue
-                prod_data[code]['visitors'] += toInt(rd.get('商品访客数'))
-                prod_data[code]['pv']       += toInt(rd.get('商品浏览量'))
-                prod_data[code]['cart']     += toInt(rd.get('商品加购件数'))
-                prod_data[code]['orders']   += toInt(rd.get('下单件数'))
-                prod_data[code]['pay']      += toInt(rd.get('支付件数'))
+            
+            header_row_idx = None
+            headers = []
+            for r in range(min(15, ws.nrows)):
+                row_vals = ws.row_values(r)
+                row_str = [str(x).strip() for x in row_vals if x is not None]
+                if '货号' in row_str:
+                    header_row_idx = r
+                    headers = [str(x).strip() if x is not None else '' for x in row_vals]
+                    break
+                    
+            if header_row_idx is not None:
+                for r in range(header_row_idx + 1, ws.nrows):
+                    row_vals = ws.row_values(r)
+                    rd = dict(zip(headers, row_vals))
+                    code = str(rd.get('货号', '')).strip()
+                    if not code or code == 'None' or code == '-': continue
+                    prod_data[code]['visitors'] += toInt(rd.get('商品访客数'))
+                    prod_data[code]['pv']       += toInt(rd.get('商品浏览量'))
+                    prod_data[code]['cart']     += toInt(rd.get('商品加购件数'))
+                    prod_data[code]['orders']   += toInt(rd.get('下单件数'))
+                    prod_data[code]['pay']      += toInt(rd.get('支付件数'))
+                    
         logger.info("生意参谋款号: %d", len(prod_data))
         return prod_data
     except Exception as e:
