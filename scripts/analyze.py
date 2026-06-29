@@ -1285,7 +1285,7 @@ def analyze():
     if approx_count > 0:
         logger.info("引入近似颜色匹配行: %d条", approx_count)
 
-    results.sort(key=lambda x: (x[2].get('delivery', ''), neg_skcs.get(x[0], 0)))
+    results.sort(key=lambda x: (x[0][:8], x[2].get('delivery', ''), neg_skcs.get(x[0], 0)))
     logger.info("窗口期到货(含近似): %d条", len(results))
 
     cutoff = (today - timedelta(days=7)).date()
