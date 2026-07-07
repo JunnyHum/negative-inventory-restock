@@ -902,12 +902,6 @@ def analyze():
     logger.info("可销<10的SKC: %d", len(neg_skcs))
 
     # ── 2. 加载前一天的仓库（用于Sheet2库存回补）────────────────────
-    cur_basename = os.path.basename(wh_file)
-    cur_date_str = re.search(r'(\d{8})', cur_basename)
-    cur_date = None
-    if cur_date_str:
-        cur_date = dt.datetime.strptime(cur_date_str.group(1), '%Y%m%d').date()
-
     all_dirs = [
         (paths.get('warehouse_dir') or ''),
         (paths.get('feishu_inbound') or ''),
@@ -917,15 +911,25 @@ def analyze():
         if d:
             all_wh_files += sorted(glob.glob(os.path.join(d, '*.xlsx')), key=os.path.getmtime, reverse=True)
 
+    # 过滤出所有合法的系统库存文件
+    valid_wh_files = []
+    for f in all_wh_files:
+        f_basename = os.path.basename(f)
+        if '系统库存导出' in f_basename and not f_basename.startswith('~$') and not f_basename.startswith('.~'):
+            if f not in valid_wh_files:
+                valid_wh_files.append(f)
+
+    # 寻找当前 wh_file 降序排列中的下一个文件
     prev_wh_file = None
-    if cur_date:
-        for f in all_wh_files:
-            f_basename = os.path.basename(f)
-            f_date_str = re.search(r'(\d{8})', f_basename)
-            f_date = None
-            if f_date_str:
-                f_date = dt.datetime.strptime(f_date_str.group(1), '%Y%m%d').date()
-            if f_date and f_date < cur_date and f != wh_file and '系统库存导出' in f_basename:
+    try:
+        cur_idx = valid_wh_files.index(wh_file)
+        if cur_idx + 1 < len(valid_wh_files):
+            prev_wh_file = valid_wh_files[cur_idx + 1]
+    except ValueError:
+        # 降级：使用修改时间仅次于当前 wh_file 的前一个有效文件
+        cur_mtime = os.path.getmtime(wh_file)
+        for f in valid_wh_files:
+            if os.path.getmtime(f) < cur_mtime and f != wh_file:
                 prev_wh_file = f
                 break
 
