@@ -266,6 +266,11 @@ def load_warehouse(filepath):
         wh_code_val = str(rd[wh_code_idx]).strip() if wh_code_idx is not None and len(rd) > wh_code_idx and rd[wh_code_idx] is not None else ''
         wh_name_val = str(rd[wh_name_idx]).strip() if wh_name_idx is not None and len(rd) > wh_name_idx and rd[wh_name_idx] is not None else ''
 
+        # 排除退货仓数据
+        is_return_wh = wh_code_val.startswith('TW201') or ('退货' in wh_name_val)
+        if is_return_wh:
+            continue
+
         if not code or len(spec) < 12:
             continue
 
