@@ -1316,14 +1316,31 @@ def analyze():
     scores   = score_and_advise(unmatched, biz_data)
 
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-           paths['output_dir'], sheet2_data, whEntityTotal, product_table
+           paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
-             output_dir, sheet2_data, whEntityTotal, product_table=None):
-    from datetime import date
-    today_str = date.today().strftime('%Y%m%d')
-    out_path  = os.path.join(output_dir, f"窗口期到货_负库存_{today_str}.xlsx")
+             output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None):
+    from datetime import datetime
+    import re
+    
+    time_suffix = ""
+    if wh_file:
+        basename = os.path.basename(wh_file)
+        # 尝试提取文件名中的14位时间戳 (如 20260707085544)
+        match_14 = re.search(r'(\d{14})', basename)
+        if match_14:
+            time_suffix = match_14.group(1)
+        else:
+            # 降级：提取8位日期并拼接当前时分秒
+            match_8 = re.search(r'(\d{8})', basename)
+            if match_8:
+                time_suffix = match_8.group(1) + datetime.now().strftime('%H%M%S')
+                
+    if not time_suffix:
+        time_suffix = datetime.now().strftime('%Y%m%d%H%M%S')
+        
+    out_path  = os.path.join(output_dir, f"窗口期到货_负库存_{time_suffix}.xlsx")
     os.makedirs(output_dir, exist_ok=True)
 
     wb = openpyxl.Workbook()
@@ -1481,7 +1498,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-        output_dir, sheet2_data, whEntityTotal, product_table = analyze()
+        output_dir, sheet2_data, whEntityTotal, product_table, wh_file = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
@@ -1489,7 +1506,7 @@ if __name__ == '__main__':
 
     if results or unmatched:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
-                        scores, output_dir, sheet2_data, whEntityTotal, product_table)
+                        scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file)
         logger.info("完成: 窗口期到货%d条 | 库存回补%d条 | 无翻单%d条",
                     len(results), len(sheet2_data), len(unmatched))
     else:
