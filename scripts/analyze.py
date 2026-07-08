@@ -737,7 +737,7 @@ def parse_individual_restock_file(filepath):
         if indexes['code'] is None or indexes['color'] is None or indexes['size'] is None:
             continue
             
-        last_skc = None
+        last_pc = None
         last_delivery = None
         last_factory = ''
         last_status = ''
@@ -781,7 +781,7 @@ def parse_individual_restock_file(filepath):
                     qty_val = float(v)
                     
             # Forward Fill 向下填充 (需在过滤下单数量之前执行，以保证合并单元格的交期状态正常传递)
-            if skc == last_skc:
+            if pc == last_pc:
                 if delivery_date is None:
                     delivery_date = last_delivery
                 else:
@@ -797,7 +797,7 @@ def parse_individual_restock_file(filepath):
                 else:
                     last_status = status
             else:
-                last_skc = skc
+                last_pc = pc
                 last_delivery = delivery_date
                 last_factory = factory
                 last_status = status
@@ -1218,8 +1218,14 @@ def analyze():
                 for r in records:
                     skc = r['skc']
                     delivery_date = r['delivery']
+                    
+                    is_missing_delivery = False
                     if delivery_date is None:
-                        continue
+                        is_missing_delivery = True
+                        delivery_date = today
+                        
+                    if isinstance(delivery_date, dt.date) and not isinstance(delivery_date, datetime):
+                        delivery_date = datetime.combine(delivery_date, datetime.min.time())
                     
                     key = (skc, delivery_date)
                     if key not in all_restock:
@@ -1227,8 +1233,12 @@ def analyze():
                             'sizes': {k: 0 for k in SIZE_KEYS},
                             'color': '',
                             'status': '',
-                            'factory': ''
+                            'factory': '',
+                            'is_missing_delivery': False
                         }
+                    
+                    if is_missing_delivery:
+                        all_restock[key]['is_missing_delivery'] = True
                     
                     sz = r['size']
                     if sz in all_restock[key]['sizes']:
@@ -1263,7 +1273,10 @@ def analyze():
                 continue
         if window_start <= actual_date <= window_end:
             d2 = dict(d)
-            d2['delivery'] = actual_date.strftime('%Y-%m-%d')
+            if d.get('is_missing_delivery'):
+                d2['delivery'] = '交期未填/待定'
+            else:
+                d2['delivery'] = actual_date.strftime('%Y-%m-%d')
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
