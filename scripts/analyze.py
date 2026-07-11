@@ -114,7 +114,7 @@ def parse_size_name_from_text(size_text):
     """从 S(165/78A) 或 S 或 均码 等文本提取尺码名"""
     if not size_text:
         return None
-    s = str(size_text).strip()
+    s = str(size_text).strip().upper()
     # 均码
     if '均码' in s or '均' in s:
         return '均码'
