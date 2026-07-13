@@ -520,6 +520,8 @@ def findColumnIndexes(headerCells: list) -> dict:
         'actual_arrival': None,  # 优先：实际到仓时间 / 实际出货时间 / 到仓时间列
         'plan_arrival': None,    # 备选：出货时间 / 货期列
         'status': None,          # 备注 / 生产状态列
+        'cleared': None,         # 是否清完 / 结清列
+        'total_qty': None,       # 总下单列
         'sizes': {}              # 尺码名 -> 列索引
     }
     
@@ -553,6 +555,10 @@ def findColumnIndexes(headerCells: list) -> dict:
             indexes['plan_arrival'] = idx
         elif val in ['备注', '生产状态']:
             indexes['status'] = idx
+        elif val in ['是否清完', '结清', '清完', '是否清']:
+            indexes['cleared'] = idx
+        elif val in ['总下单', '总下单数', '下单总量']:
+            indexes['total_qty'] = idx
             
         for size_name, patterns in size_patterns.items():
             for pat in patterns:
@@ -1013,16 +1019,43 @@ def analyze():
             if not pc:
                 continue
                 
-            # 过滤已出货
+            # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
             shipped_idx = sg_indexes['shipped']
-            if shipped_idx is not None and len(rd) > shipped_idx:
+            cleared_idx = sg_indexes.get('cleared')
+            total_qty_idx = sg_indexes.get('total_qty')
+            
+            is_shipped_clean = False
+            
+            # 1. 优先通过 "是否清完" 列进行结清打标判定
+            if cleared_idx is not None and len(rd) > cleared_idx:
+                cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
+                if any(x in cleared_val for x in ['清', '是', '已清', '完']):
+                    is_shipped_clean = True
+            
+            # 2. 备选：如果出货量大于等于总下单量，也视为结清
+            if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
                 shipped = rd[shipped_idx]
                 if shipped is not None and shipped != '':
                     try:
-                        if float(shipped) > 0:
-                            continue
+                        shipped_val = float(shipped)
+                        if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                            try:
+                                total_qty_val = float(rd[total_qty_idx])
+                                if total_qty_val > 0 and shipped_val >= total_qty_val:
+                                    is_shipped_clean = True
+                            except ValueError:
+                                # 如果总下单列的值无法转为数值，则退避到出货量 > 0 即判定
+                                if shipped_val > 0:
+                                    is_shipped_clean = True
+                        else:
+                            # 兜底：如果没有总下单列，只要总出货 > 0 也判定出货已清
+                            if shipped_val > 0:
+                                is_shipped_clean = True
                     except ValueError:
                         pass
+            
+            if is_shipped_clean:
+                continue
                         
             color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
             mc = re.search(r'\[(\d+)\]', color)
@@ -1079,12 +1112,43 @@ def analyze():
                 if not pc:
                     continue
                     
-                # 过滤已出货
+                # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
                 shipped_idx = nba_indexes['shipped']
-                if shipped_idx is not None and len(rd) > shipped_idx:
+                cleared_idx = nba_indexes.get('cleared')
+                total_qty_idx = nba_indexes.get('total_qty')
+                
+                is_shipped_clean = False
+                
+                # 1. 优先通过 "是否清完" 列进行结清打标判定
+                if cleared_idx is not None and len(rd) > cleared_idx:
+                    cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
+                    if any(x in cleared_val for x in ['清', '是', '已清', '完']):
+                        is_shipped_clean = True
+                
+                # 2. 备选：如果出货量大于等于总下单量，也视为结清
+                if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
                     shipped = rd[shipped_idx]
-                    if shipped is not None and (isinstance(shipped, (int, float)) and shipped > 0):
-                        continue
+                    if shipped is not None and shipped != '':
+                        try:
+                            shipped_val = float(shipped)
+                            if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                                try:
+                                    total_qty_val = float(rd[total_qty_idx])
+                                    if total_qty_val > 0 and shipped_val >= total_qty_val:
+                                        is_shipped_clean = True
+                                except ValueError:
+                                    # 如果总下单列的值无法转为数值，则退避到出货量 > 0 即判定
+                                    if shipped_val > 0:
+                                        is_shipped_clean = True
+                            else:
+                                # 兜底：如果没有总下单列，只要总出货 > 0 也判定出货已清
+                                if shipped_val > 0:
+                                    is_shipped_clean = True
+                        except ValueError:
+                            pass
+                
+                if is_shipped_clean:
+                    continue
                         
                 color = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
                 mc = re.search(r'\[(\d+)\]', color)
