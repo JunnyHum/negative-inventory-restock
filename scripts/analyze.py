@@ -876,8 +876,17 @@ def analyze():
         raise FileNotFoundError("未找到仓库库存文件，请确认数据源路径")
     logger.info("仓库文件: %s", wh_file)
 
-    # 动态窗口期：今天前10天 ~ 今天后15天
+    # 优先从库存文件名中提取分析日期以避免物理服务器与业务模拟时空不一致的 Bug
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    m_wh = re.search(r'_(\d{8})\d*', os.path.basename(wh_file))
+    if m_wh:
+        try:
+            today = datetime.strptime(m_wh.group(1), "%Y%m%d").replace(hour=0, minute=0, second=0, microsecond=0)
+            logger.info("🎯 自动从库存文件名解析出目标运行日期: %s", today.strftime('%Y-%m-%d'))
+        except ValueError:
+            pass
+
+    # 动态窗口期：今天前10天 ~ 今天后15天
     window_start = today - timedelta(days=10)
     window_end   = today + timedelta(days=15)
     logger.info("窗口期: %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
@@ -1196,7 +1205,7 @@ def analyze():
         if os.path.exists(wechat_dir):
             candidates += glob.glob(os.path.join(wechat_dir, "**", "*翻单*.xlsx"), recursive=True)
             
-        now = datetime.now()
+        now = today
         now_year, now_week, _ = now.isocalendar()
         
         def is_file_in_current_week(filepath):
