@@ -166,6 +166,15 @@ def get_date_value(val):
             month = int(m.group(1))
             year = inferYear(month)
             return datetime(year, month, int(m.group(2)))
+        # 尝试标准年-月-日或月-日等格式解析
+        for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%m-%d', '%m/%d']:
+            try:
+                dt_val = datetime.strptime(s, fmt)
+                if fmt in ['%m-%d', '%m/%d']:
+                    dt_val = dt_val.replace(year=inferYear(dt_val.month))
+                return dt_val
+            except ValueError:
+                pass
         return None
 
     if val is None: return None
@@ -174,7 +183,48 @@ def get_date_value(val):
         return excel_serial_to_date(val)
     s = str(val).strip()
     if not s or s in ['-', 'None', '']: return None
+    # 对于已经是标准的年-月-日字符串，直接尝试解析
+    for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%m-%d', '%m/%d']:
+        try:
+            dt_val = datetime.strptime(s, fmt)
+            if fmt in ['%m-%d', '%m/%d']:
+                dt_val = dt_val.replace(year=inferYear(dt_val.month))
+            return dt_val
+        except ValueError:
+            pass
     return None
+
+def split_row_by_newline(rd, indexes):
+    """
+    根据 plan_arrival/actual_arrival 以及 total_qty 列的换行符拆分行数据
+    返回列表 [rd1, rd2, ...]
+    """
+    del_idx = indexes['plan_arrival'] if indexes['plan_arrival'] is not None else indexes['actual_arrival']
+    qty_idx = indexes['total_qty']
+    
+    del_text = str(rd[del_idx]).strip() if del_idx is not None and len(rd) > del_idx and rd[del_idx] is not None else ''
+    qty_text = str(rd[qty_idx]).strip() if qty_idx is not None and len(rd) > qty_idx and rd[qty_idx] is not None else ''
+    
+    # 只要日期或下单量含有换行符，且它们并不是简单相同的重复，就进行分裂
+    if '\n' in del_text or '\n' in qty_text:
+        del_parts = [p.strip() for p in del_text.split('\n') if p.strip()]
+        qty_parts = [p.strip() for p in qty_text.split('\n') if p.strip()]
+        
+        # 补全列表长度使两者一致
+        max_parts = max(len(del_parts), len(qty_parts))
+        sub_rds = []
+        for i in range(max_parts):
+            d_part = del_parts[i] if i < len(del_parts) else (del_parts[-1] if del_parts else '')
+            q_part = qty_parts[i] if i < len(qty_parts) else (qty_parts[-1] if qty_parts else '')
+            
+            new_rd = list(rd)
+            if del_idx is not None and len(new_rd) > del_idx:
+                new_rd[del_idx] = d_part
+            if qty_idx is not None and len(new_rd) > qty_idx:
+                new_rd[qty_idx] = q_part
+            sub_rds.append(new_rd)
+        return sub_rds
+    return [rd]
 
 # ── 库存加载（新格式）───────────────────────────────────────────────────────
 def findWarehouseColumnIndexes(headerCells: list) -> dict:
@@ -306,29 +356,63 @@ def load_warehouse(filepath):
     logger.info("新格式解析: %d个SKC", len(wh_neg_total))
     return wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes
 
-# ── 店铺商品表（正价Sheet）───────────────────────────────────────────────────
+# ── 店铺商品表（全 Sheet 动态识别）───────────────────────────────────────────
 def load_product_table(filepath):
-    """加载正价Sheet，返回 {款号: {上架日期}}"""
+    """扫描商品表文件中的所有 Sheet，动态定位款号、上架日期与商品状态，返回 {款号: {'上架日期': listDate, '商品状态': statusVal}}"""
     if not filepath or not os.path.exists(filepath):
         return {}
     try:
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
-        ws = wb['正价'] if '正价' in wb.sheetnames else wb.active
         result = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            rd = list(row)
-            productCode = str(rd[1]).strip() if rd[1] else ''
-            if not productCode:
+        for sh in wb.sheetnames:
+            ws = wb[sh]
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
                 continue
-            listDate = rd[13] if len(rd) > 13 else None
-            result[productCode] = {
-                '上架日期': listDate,
-            }
+            
+            # 动态查找表头
+            header_idx = -1
+            code_col = None
+            date_col = None
+            status_col = None
+            
+            for r_i, r in enumerate(rows[:10]):
+                if not r: continue
+                r_str = [str(x).strip() if x is not None else '' for x in r]
+                for c_i, val in enumerate(r_str):
+                    if val in ['商品编码', '款号', '商家编码']:
+                        code_col = c_i
+                    elif val in ['上架日期', '上架时间']:
+                        date_col = c_i
+                    elif val in ['商品状态', '状态', '在售状态']:
+                        status_col = c_i
+                if code_col is not None:
+                    header_idx = r_i
+                    break
+            
+            if code_col is None:
+                continue
+                
+            for row in rows[header_idx + 1:]:
+                if not row or len(row) <= code_col:
+                    continue
+                productCode = str(row[code_col]).strip() if row[code_col] else ''
+                if not productCode or productCode == 'None':
+                    continue
+                
+                listDate = row[date_col] if (date_col is not None and len(row) > date_col) else None
+                statusVal = str(row[status_col]).strip() if (status_col is not None and len(row) > status_col and row[status_col]) else ''
+                
+                if productCode not in result or (listDate and not result[productCode].get('上架日期')):
+                    result[productCode] = {
+                        '上架日期': listDate,
+                        '商品状态': statusVal,
+                    }
         wb.close()
-        logger.info("正价表款号: %d个", len(result))
+        logger.info("店铺商品表全表匹配款号: %d个", len(result))
         return result
     except Exception as e:
-        logger.warning("加载正价表失败: %s", e)
+        logger.warning("加载店铺商品表失败: %s", e)
         return {}
 
 # ── 生意参谋 ─────────────────────────────────────────────────────────────────
@@ -551,13 +635,13 @@ def findColumnIndexes(headerCells: list) -> dict:
             indexes['shipped'] = idx
         elif val in ['实际到仓时间', '实际出货时间', '实际\n出货时间', '到仓时间']:
             indexes['actual_arrival'] = idx
-        elif val in ['出货时间', '货期']:
+        elif val in ['出货时间', '货期', '到货时间', '到货日期', '交货期']:
             indexes['plan_arrival'] = idx
         elif val in ['备注', '生产状态']:
             indexes['status'] = idx
         elif val in ['是否清完', '结清', '清完', '是否清']:
             indexes['cleared'] = idx
-        elif val in ['总下单', '总下单数', '下单总量']:
+        elif val in ['总下单', '总下单数', '下单总量', '翻单数量', '翻单数', '翻下单数']:
             indexes['total_qty'] = idx
             
         for size_name, patterns in size_patterns.items():
@@ -568,12 +652,18 @@ def findColumnIndexes(headerCells: list) -> dict:
                     
     return indexes
 
+def get_row_values_safely(ws, r_num):
+    try:
+        return [cell.value for cell in next(ws.iter_rows(min_row=r_num, max_row=r_num))]
+    except StopIteration:
+        return []
+
 def getHeaderRowAndIndexes(ws) -> tuple[int, dict]:
     """
     在工作表中定位表头行并返回 (1-based行号, 列索引字典)
     """
     for r in range(1, 15):
-        row_cells = [cell.value for cell in next(ws.iter_rows(min_row=r, max_row=r))]
+        row_cells = get_row_values_safely(ws, r)
         if not any(row_cells):
             continue
         row_str = [str(x).strip() for x in row_cells if x is not None]
@@ -581,7 +671,7 @@ def getHeaderRowAndIndexes(ws) -> tuple[int, dict]:
             indexes = findColumnIndexes(row_cells)
             return r, indexes
             
-    first_row = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    first_row = get_row_values_safely(ws, 1)
     return 1, findColumnIndexes(first_row)
 
 # ── 色系分组（2026-06-04 完整版:从商品资料.基础信息 提取 11 系 100 色）──────────
@@ -728,8 +818,11 @@ def parse_individual_restock_file(filepath):
                 indexes['delivery'] = idx
             elif val == '工厂':
                 indexes['factory'] = idx
-            elif val in ['生产部', '备注', '状态']:
+            elif val in ['生产部', '状态', '生产状态']:
                 indexes['status'] = idx
+            elif val == '备注':
+                if indexes['status'] is None:
+                    indexes['status'] = idx
 
         # 兜底匹配 qty 列
         if indexes['qty'] is None:
@@ -786,27 +879,23 @@ def parse_individual_restock_file(filepath):
                 if isinstance(v, (int, float)):
                     qty_val = float(v)
                     
-            # Forward Fill 向下填充 (需在过滤下单数量之前执行，以保证合并单元格的交期状态正常传递)
-            if pc == last_pc:
-                if delivery_date is None:
-                    delivery_date = last_delivery
-                else:
-                    last_delivery = delivery_date
-                    
-                if not factory:
-                    factory = last_factory
-                else:
-                    last_factory = factory
-                    
-                if not status:
-                    status = last_status
-                else:
-                    last_status = status
+            # Forward Fill 向下填充 (全局向下填充以支持跨货号合并单元格的交期、工厂、状态正常传递)
+            if delivery_date is None:
+                delivery_date = last_delivery
             else:
-                last_pc = pc
                 last_delivery = delivery_date
+                
+            if not factory:
+                factory = last_factory
+            else:
                 last_factory = factory
+                
+            if not status:
+                status = last_status
+            else:
                 last_status = status
+                
+            last_pc = pc
                 
             if qty_val <= 0:
                 continue
@@ -854,8 +943,9 @@ def analyze():
             # 找到 jeoms-inventory 技能脚本的路径
             jeoms_script_path = Path(__file__).parent.parent.parent / 'jeoms-inventory' / 'main.py'
             if jeoms_script_path.exists():
-                import subprocess
-                cmd = [sys.executable, str(jeoms_script_path)]
+                import subprocess, shutil
+                python_bin = shutil.which('python3') or sys.executable
+                cmd = [python_bin, str(jeoms_script_path)]
                 logger.info("运行命令: %s", " ".join(cmd))
                 res = subprocess.run(cmd, capture_output=True, text=True)
                 if res.returncode == 0:
@@ -964,143 +1054,162 @@ def analyze():
     product_table = load_product_table(paths.get('product_table'))
     today_date = datetime.now().date()
 
-    sheet2_data = []
-    if prev_wh_file:
-        for skc, cur_total in wh_neg_total.items():
-            code = skc[:8]
-            is_junma = product_is_junma.get(code, False)
-            
-            # 判断昨日与今日是否实际有库存（独享仓最高优先级）
-            prev_sizes = prev_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
-            cur_sizes = wh_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
-            
-            yesterday_has_stock = has_skc_stock(skc, prev_sizes, is_junma)
-            today_has_stock = has_skc_stock(skc, cur_sizes, is_junma)
-            
-            if not yesterday_has_stock and today_has_stock:
-                productCode = skc[:8]
-                if productCode in product_table:
-                    listDate = product_table[productCode].get('上架日期')
-                    if listDate and hasattr(listDate, 'date') and listDate.date() > today_date:
-                        remark = '自动铺货'
-                    else:
-                        remark = '开启商品同步'
-                else:
-                    remark = '新款待上架'
-                sheet2_data.append({
-                    'skc': skc,
-                    'color': wh_colors_txt.get(skc, ''),
-                    'cur_total': cur_total,
-                    'prev_total': prev_neg_total.get(skc, 0),
-                    'prev_sizes': prev_sizes,
-                    'cur_sizes':  cur_sizes,
-                    '备注': remark,
-                })
-    logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
+
 
     # ── 3. 加载翻单记录 ──────────────────────────────────────────────
     restock_dir = paths['restock_dir']
     sg_files = sorted(glob.glob(os.path.join(restock_dir, pats['sg_restock'])), key=os.path.getmtime, reverse=True)
     nba_files = sorted(glob.glob(os.path.join(restock_dir, pats['nba_restock'])), key=os.path.getmtime, reverse=True)
+    
+
     if not sg_files:
         raise FileNotFoundError(f"未找到SG品牌进度表")
     nba_file = nba_files[0] if nba_files else None
 
     all_restock = {}  # {(skc, date): {...}}
     skc_has_any = set()
+    master_progress_skcs = set() # 存放所有在大货进度表中出现的 SKC 集合
+    master_progress_codes = set() # 存放所有在大货进度表中出现的款号集合
 
-    # SG品牌进度表 (多 Sheet 自适应与日期回退)
-    wb1 = openpyxl.load_workbook(sg_files[0], data_only=True, read_only=True)
-    for sheet in wb1.sheetnames:
-        ws1 = wb1[sheet]
-        header_num, sg_indexes = getHeaderRowAndIndexes(ws1)
-        
-        # 必须找到关键列，否则视为无效 Sheet 并自动跳过
-        if sg_indexes['code'] is None or sg_indexes['color'] is None:
-            continue
+    # SG品牌进度表 (多文件与多 Sheet 自适应与日期回退)
+    for sg_file in sg_files:
+        wb1 = openpyxl.load_workbook(sg_file, data_only=True, read_only=True)
+        for sheet in wb1.sheetnames:
+            ws1 = wb1[sheet]
+            header_num, sg_indexes = getHeaderRowAndIndexes(ws1)
             
-        logger.info("解析 SG 品牌进度表 Sheet: %s", sheet)
-        for row in ws1.iter_rows(min_row=header_num + 1, values_only=True):
-            rd = list(row)
-            if len(rd) <= max(sg_indexes['code'], sg_indexes['color']):
-                continue
-            pc = str(rd[sg_indexes['code']]).strip() if rd[sg_indexes['code']] else ''
-            if not pc:
+            # 必须找到关键列，否则视为无效 Sheet 并自动跳过
+            if sg_indexes['code'] is None or sg_indexes['color'] is None:
                 continue
                 
-            # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
-            shipped_idx = sg_indexes['shipped']
-            cleared_idx = sg_indexes.get('cleared')
-            total_qty_idx = sg_indexes.get('total_qty')
-            
-            is_shipped_clean = False
-            
-            # 1. 优先通过 "是否清完" 列进行结清打标判定
-            if cleared_idx is not None and len(rd) > cleared_idx:
-                cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
-                if any(x in cleared_val for x in ['清', '是', '已清', '完']):
-                    is_shipped_clean = True
-            
-            # 2. 备选：如果出货量大于等于总下单量，也视为结清
-            if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
-                shipped = rd[shipped_idx]
-                if shipped is not None and shipped != '':
-                    try:
-                        shipped_val = float(shipped)
-                        if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+            logger.info("解析 SG 品牌进度表 Sheet: %s", sheet)
+            for row in ws1.iter_rows(min_row=header_num + 1, values_only=True):
+                rd_raw = list(row)
+                if len(rd_raw) <= max(sg_indexes['code'], sg_indexes['color']):
+                    continue
+                pc = str(rd_raw[sg_indexes['code']]).strip() if rd_raw[sg_indexes['code']] else ''
+                if not pc:
+                    continue
+                master_progress_codes.add(pc)
+                    
+                # 自适应换行拆分
+                sub_rds = split_row_by_newline(rd_raw, sg_indexes)
+                for rd in sub_rds:
+                    # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
+                    shipped_idx = sg_indexes['shipped']
+                    cleared_idx = sg_indexes.get('cleared')
+                    total_qty_idx = sg_indexes.get('total_qty')
+                    
+                    is_shipped_clean = False
+                    
+                    # 1. 优先通过 "是否清完" 列进行结清打标判定
+                    if cleared_idx is not None and len(rd) > cleared_idx:
+                        cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
+                        if any(x in cleared_val for x in ['清', '是', '已清', '完']):
+                            is_shipped_clean = True
+                    
+                    # 2. 备选：如果出货量大于等于总下单量，也视为结清
+                    if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
+                        shipped = rd[shipped_idx]
+                        if shipped is not None and shipped != '':
                             try:
-                                total_qty_val = float(rd[total_qty_idx])
-                                if total_qty_val > 0 and shipped_val >= total_qty_val:
-                                    is_shipped_clean = True
+                                shipped_val = float(shipped)
+                                if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                                    try:
+                                        total_qty_val = float(rd[total_qty_idx])
+                                        if total_qty_val > 0 and shipped_val >= total_qty_val:
+                                            is_shipped_clean = True
+                                    except ValueError:
+                                        # 如果总下单列的值无法转为数值，则退避到出货量 > 0 即判定
+                                        if shipped_val > 0:
+                                            is_shipped_clean = True
+                                else:
+                                    # 兜底：如果没有总下单列，只要总出货 > 0 也判定出货已清
+                                    if shipped_val > 0:
+                                        is_shipped_clean = True
                             except ValueError:
-                                # 如果总下单列的值无法转为数值，则退避到出货量 > 0 即判定
-                                if shipped_val > 0:
-                                    is_shipped_clean = True
-                        else:
-                            # 兜底：如果没有总下单列，只要总出货 > 0 也判定出货已清
-                            if shipped_val > 0:
-                                is_shipped_clean = True
-                    except ValueError:
-                        pass
-            
-            if is_shipped_clean:
-                continue
+                                pass
+                    
+                    if is_shipped_clean:
+                        continue
+                                
+                    color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
+                    mc = re.search(r'\[(\d+)\]', color)
+                    cc = mc.group(1) if mc else '?'
+                    skc = pc + cc
+                    
+                    # 实际到仓时间 / 实际出货时间 提取（带回退）
+                    actual_date = None
+                    act_idx = sg_indexes['actual_arrival']
+                    if act_idx is not None and len(rd) > act_idx:
+                        actual_date = get_date_value(rd[act_idx])
+                    if actual_date is None:
+                        plan_idx = sg_indexes['plan_arrival']
+                        if plan_idx is not None and len(rd) > plan_idx:
+                            actual_date = get_date_value(rd[plan_idx])
+                            
+                    key = (skc, actual_date)
+                    if key not in all_restock:
+                        all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': ''}
                         
-            color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
-            mc = re.search(r'\[(\d+)\]', color)
-            cc = mc.group(1) if mc else '?'
-            skc = pc + cc
-            
-            # 实际到仓时间 / 实际出货时间 提取（带回退）
-            actual_date = None
-            act_idx = sg_indexes['actual_arrival']
-            if act_idx is not None and len(rd) > act_idx:
-                actual_date = get_date_value(rd[act_idx])
-            if actual_date is None:
-                plan_idx = sg_indexes['plan_arrival']
-                if plan_idx is not None and len(rd) > plan_idx:
-                    actual_date = get_date_value(rd[plan_idx])
-                    
-            key = (skc, actual_date)
-            if key not in all_restock:
-                all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': ''}
-                
-            for sz, idx in sg_indexes['sizes'].items():
-                if idx is not None and len(rd) > idx:
-                    val = rd[idx]
-                    all_restock[key]['sizes'][sz] += val if isinstance(val, (int, float)) else 0
-                    
-            status_idx = sg_indexes['status']
-            if status_idx is not None and len(rd) > status_idx and rd[status_idx]:
-                all_restock[key]['status'] = str(rd[status_idx])[:30]
-                
-            factory_idx = sg_indexes['factory']
-            if factory_idx is not None and len(rd) > factory_idx and rd[factory_idx]:
-                all_restock[key]['factory'] = str(rd[factory_idx])
-                
-            if skc: 
-                skc_has_any.add(skc)
-    wb1.close()
+                    # 提取各个尺码数量并准备重新分摊
+                    row_sizes = {}
+                    row_sizes_sum = 0
+                    for sz, idx in sg_indexes['sizes'].items():
+                        val = 0
+                        if idx is not None and len(rd) > idx:
+                            raw_val = rd[idx]
+                            if isinstance(raw_val, (int, float)):
+                                val = max(0.0, float(raw_val))
+                        row_sizes[sz] = val
+                        row_sizes_sum += val
+                        
+                    # 提取下单总量
+                    total_qty_val = 0
+                    if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                        try:
+                            total_qty_val = max(0.0, float(rd[total_qty_idx]))
+                        except ValueError:
+                            pass
+                            
+                    if total_qty_val > 0:
+                        if abs(row_sizes_sum - total_qty_val) > 1.0:
+                            if row_sizes_sum > 0:
+                                # 按各码现有的比例分摊
+                                temp_sum = 0
+                                for sz in row_sizes:
+                                    ratio = row_sizes[sz] / row_sizes_sum
+                                    row_sizes[sz] = round(total_qty_val * ratio)
+                                    temp_sum += row_sizes[sz]
+                                diff = total_qty_val - temp_sum
+                                if diff != 0 and row_sizes:
+                                    max_sz = max(row_sizes, key=row_sizes.get)
+                                    row_sizes[max_sz] += diff
+                            else:
+                                # 平摊
+                                valid_sizes = [s for s in ['S', 'M', 'L', 'XL', '2XL'] if s in row_sizes]
+                                if valid_sizes:
+                                    base_qty = total_qty_val // len(valid_sizes)
+                                    rem = total_qty_val % len(valid_sizes)
+                                    for s in valid_sizes:
+                                        row_sizes[s] = base_qty
+                                    row_sizes[valid_sizes[0]] += rem
+                                    
+                    for sz, val in row_sizes.items():
+                        all_restock[key]['sizes'][sz] += val
+                        
+                    status_idx = sg_indexes['status']
+                    if status_idx is not None and len(rd) > status_idx and rd[status_idx]:
+                        all_restock[key]['status'] = str(rd[status_idx])[:30]
+                        
+                    factory_idx = sg_indexes['factory']
+                    if factory_idx is not None and len(rd) > factory_idx and rd[factory_idx]:
+                        all_restock[key]['factory'] = str(rd[factory_idx])
+                        
+                    if skc: 
+                        skc_has_any.add(skc)
+                        master_progress_skcs.add(skc)
+        wb1.close()
 
     # NBA翻单表 (多 Sheet 自适应与日期回退)
     if nba_file and os.path.exists(nba_file):
@@ -1120,6 +1229,7 @@ def analyze():
                 pc = str(rd[nba_indexes['code']]).strip() if rd[nba_indexes['code']] else ''
                 if not pc:
                     continue
+                master_progress_codes.add(pc)
                     
                 # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
                 shipped_idx = nba_indexes['shipped']
@@ -1193,6 +1303,7 @@ def analyze():
                     
                 if skc: 
                     skc_has_any.add(skc)
+                    master_progress_skcs.add(skc)
         wb2.close()
 
     # ── 3.5 扫描并加载独立翻单表 ──────────────────────────────────────
@@ -1255,43 +1366,45 @@ def analyze():
                 
             return f"{brand}_{owner}"
 
-        groups = {}
-        filtered_count = 0
+        # 跟踪每个负责人 gk 分组中，各 SKU 在各到货日期的最后一次写入值，从而实现覆盖去重
+        # 格式：{(gk, skc, size, delivery_date): {'qty': qty, 'status': status, 'factory': factory, 'is_missing_delivery': bool}}
+        gk_sku_restock = {}
+        
+        # 1. 过滤：滚动加载最近 14 天内修改或接收的翻单文件，以确保上周活跃翻单不会丢失
+        limit_time = today - timedelta(days=14)
+        valid_candidates = []
         for filepath in candidates:
             basename = os.path.basename(filepath)
             if basename.startswith('~$') or basename.startswith('.~'):
                 continue
-                
-            # 1. 过滤：只保留本自然周的数据
-            if not is_file_in_current_week(filepath):
-                filtered_count += 1
-                continue
-                
-            # 2. 分组并取最新
-            gk = get_group_key(basename)
             mtime = os.path.getmtime(filepath)
-            if gk not in groups or mtime > groups[gk]['mtime']:
-                groups[gk] = {
-                    'path': filepath,
-                    'mtime': mtime
-                }
-
-        if filtered_count > 0:
-            logger.info("自动过滤掉 %d 个历史周的独立翻单文件", filtered_count)
-
-        logger.info("自动识别出当周独立翻单表分组：")
-        for gk, info in groups.items():
-            logger.info("  分组【%s】最新的文件: %s (修改时间: %s)", 
-                        gk, os.path.basename(info['path']), 
-                        datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M:%S'))
+            if datetime.fromtimestamp(mtime) >= limit_time:
+                valid_candidates.append((filepath, mtime))
+                
+        # 2. 对所有文件按修改时间从旧到新（升序）排列，使较新的文件覆盖旧文件中的重合记录
+        valid_candidates.sort(key=lambda x: x[1])
+        
+        logger.info("自动过滤后待解析独立翻单文件共: %d个", len(valid_candidates))
+        for filepath, mtime in valid_candidates:
+            basename = os.path.basename(filepath)
+            gk = get_group_key(basename)
+            logger.info("  解析独立翻单表: %s (分组: %s, 修改时间: %s)", 
+                        basename, gk, datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S'))
             
             try:
-                records = parse_individual_restock_file(info['path'])
-                logger.info("  从 %s 中解析出 %d 条翻单记录", os.path.basename(info['path']), len(records))
+                records = parse_individual_restock_file(filepath)
+                logger.info("    从 %s 中解析出 %d 条翻单记录", basename, len(records))
                 for r in records:
+                    # 滚动活跃池交期有效性校验：如果是本周以前的历史老文件，且其交期早于(today - 7天)，判定为已完全交付的陈旧记录，跳过不计入
+                    if not is_file_in_current_week(filepath) and r['delivery'] is not None:
+                        comp_del = r['delivery']
+                        if isinstance(comp_del, dt.date) and not isinstance(comp_del, datetime):
+                            comp_del = datetime.combine(comp_del, datetime.min.time())
+                        if comp_del < today - timedelta(days=7):
+                            continue
+
                     skc = r['skc']
                     delivery_date = r['delivery']
-                    
                     is_missing_delivery = False
                     if delivery_date is None:
                         is_missing_delivery = True
@@ -1299,44 +1412,113 @@ def analyze():
                         
                     if isinstance(delivery_date, dt.date) and not isinstance(delivery_date, datetime):
                         delivery_date = datetime.combine(delivery_date, datetime.min.time())
-                    
-                    key = (skc, delivery_date)
-                    if key not in all_restock:
-                        all_restock[key] = {
-                            'sizes': {k: 0 for k in SIZE_KEYS},
-                            'color': '',
-                            'status': '',
-                            'factory': '',
-                            'is_missing_delivery': False
-                        }
-                    
-                    if is_missing_delivery:
-                        all_restock[key]['is_missing_delivery'] = True
-                    
+                        
                     sz = r['size']
-                    if sz in all_restock[key]['sizes']:
-                        all_restock[key]['sizes'][sz] += r['qty']
-                    
-                    if r['status']:
-                        all_restock[key]['status'] = str(r['status'])[:30]
-                    if r['factory']:
-                        all_restock[key]['factory'] = str(r['factory'])
+                    # 相同 (gk, skc, sz, delivery_date) 在新文件里有就直接更新覆盖，而非直接叠加
+                    gk_key = (gk, skc, sz, delivery_date)
+                    gk_sku_restock[gk_key] = {
+                        'qty': r['qty'],
+                        'status': str(r['status'])[:30] if r['status'] else '',
+                        'factory': str(r['factory']) if r['factory'] else '',
+                        'is_missing_delivery': is_missing_delivery,
+                        'source': basename
+                    }
                     
                     if skc:
                         skc_has_any.add(skc)
             except Exception as ex:
-                logger.error("  解析独立翻单表 %s 失败: %s", os.path.basename(info['path']), ex)
+                logger.error("  解析独立翻单表 %s 失败: %s", basename, ex)
+                
+        # 3. 汇总合并所有分组的去重翻单数据
+        for (gk, skc, sz, delivery_date), info in gk_sku_restock.items():
+            key = (skc, delivery_date)
+            if key not in all_restock:
+                all_restock[key] = {
+                    'sizes': {k: 0 for k in SIZE_KEYS},
+                    'color': '',
+                    'status': '',
+                    'factory': '',
+                    'is_missing_delivery': False,
+                    'source': ''
+                }
+            if sz in all_restock[key]['sizes']:
+                all_restock[key]['sizes'][sz] += info['qty']
+                
+            if info['is_missing_delivery']:
+                all_restock[key]['is_missing_delivery'] = True
+            if info['status']:
+                all_restock[key]['status'] = info['status']
+            if info['factory']:
+                all_restock[key]['factory'] = info['factory']
+            if info.get('source'):
+                all_restock[key]['source'] = info['source']
                 
     except Exception as e:
         logger.error("扫描独立翻单表失败: %s", e)
 
     logger.info("翻单记录: %d条", len(all_restock))
 
+    # ── 3.8 生成库存回补数据（Sheet2）─────────────────────────────────
+    sheet2_data = []
+    if prev_wh_file:
+        for skc, cur_total in wh_neg_total.items():
+            code = skc[:8]
+            is_junma = product_is_junma.get(code, False)
+            
+            # 判断昨日与今日是否实际有库存（独享仓最高优先级）
+            prev_sizes = prev_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
+            cur_sizes = wh_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
+            
+            yesterday_has_stock = has_skc_stock(skc, prev_sizes, is_junma)
+            today_has_stock = has_skc_stock(skc, cur_sizes, is_junma)
+            
+            if not yesterday_has_stock and today_has_stock:
+                productCode = skc[:8]
+                if productCode in product_table:
+                    listDate = product_table[productCode].get('上架日期')
+                    if listDate and hasattr(listDate, 'date') and listDate.date() > today_date:
+                        remark = '🚀 自动铺货(新品预售)'
+                    else:
+                        remark = '📦 开启商品同步'
+                elif productCode in master_progress_codes or skc in master_progress_skcs or skc in skc_has_any:
+                    remark = '🌟 大货新品到仓(待上架)'
+                else:
+                    remark = '❓ 异常新品到仓(商品表未录)'
+                    
+                sheet2_data.append({
+                    'skc': skc,
+                    'color': wh_colors_txt.get(skc, ''),
+                    'cur_total': cur_total,
+                    'prev_total': prev_neg_total.get(skc, 0),
+                    'prev_sizes': prev_sizes,
+                    'cur_sizes':  cur_sizes,
+                    '备注': remark,
+                })
+    logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
+
+    # 跨源交叉审计：提取被大货进度表完全遗漏的微信活跃翻单
+    omitted_details = []
+    for (skc, actual_date), d in all_restock.items():
+        if skc and skc not in master_progress_skcs:
+            total_qty = sum(d['sizes'].values())
+            if total_qty > 0 and d.get('source'):
+                owner = d.get('status') or ''
+                omitted_details.append({
+                    'skc': skc,
+                    'code': skc[:8],
+                    'color': wh_colors_txt.get(skc, d.get('color', '')),
+                    'delivery': actual_date,
+                    'qty': total_qty,
+                    'owner': owner,
+                    'factory': d.get('factory') or '',
+                    'source': d.get('source') or ''
+                })
+
     # ── 4. 窗口期过滤 ─────────────────────────────────────────────────
     results = []
     for (skc, actual_date), d in all_restock.items():
-        if skc not in neg_skcs: continue
         total = sum(d['sizes'].values())
+        if skc not in neg_skcs: continue
         if total <= 0: continue
         if actual_date is None: continue
         if not isinstance(actual_date, datetime):
@@ -1351,6 +1533,12 @@ def analyze():
             else:
                 d2['delivery'] = actual_date.strftime('%Y-%m-%d')
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
+            
+            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记
+            if skc not in master_progress_skcs:
+                owner = d.get('status') or ''
+                d2['status'] = f"⚠️大货表缺失({owner})"
+                
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
 
@@ -1402,11 +1590,11 @@ def analyze():
     scores   = score_and_advise(unmatched, biz_data)
 
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-           paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file
+           paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
-             output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None):
+             output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None, omitted_details=None):
     from datetime import datetime
     import re
     
@@ -1503,7 +1691,19 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
 
-    for d2 in sheet2_data:
+    # 按运营优先级排序：1.开启商品同步 ➔ 2.大货新品到仓 ➔ 3.自动铺货 ➔ 4.异常新品到仓
+    priority_map = {
+        '📦 开启商品同步': 1,
+        '开启商品同步': 1,
+        '🌟 大货新品到仓(待上架)': 2,
+        '🚀 自动铺货(新品预售)': 3,
+        '自动铺货': 3,
+        '❓ 异常新品到仓(商品表未录)': 4,
+        '新款待上架': 4
+    }
+    sorted_sheet2 = sorted(sheet2_data, key=lambda x: priority_map.get(x.get('备注', ''), 99))
+
+    for d2 in sorted_sheet2:
         skc        = d2['skc']
         cur_sizes  = d2['cur_sizes']
         prev_sizes = d2['prev_sizes']
@@ -1526,14 +1726,23 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ]
         ws2.append(row)
         rn = ws2.max_row
-        fill_color = {'自动铺货': 'DAEFCE', '开启商品同步': 'FFF2CC', '新款待上架': 'D9D9D9'}.get(remark, 'DAEFCE')
+        color_map = {
+            '📦 开启商品同步': 'FFF2CC',         # 暖黄色高亮
+            '🚀 自动铺货(新品预售)': 'DAEFCE',    # 清新浅绿
+            '🌟 大货新品到仓(待上架)': 'E2EFDA',   # 柔和浅青绿
+            '❓ 异常新品到仓(商品表未录)': 'F4CCCC', # 醒目浅红警告
+            '开启商品同步': 'FFF2CC',
+            '自动铺货': 'DAEFCE',
+            '新款待上架': 'F4CCCC'
+        }
+        fill_color = color_map.get(remark, 'FFFFFF')
         for ci in range(1, len(headers2) + 1):
             cell = ws2.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12]
+    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 26]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
@@ -1573,6 +1782,42 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws3.freeze_panes = 'A2'
     ws3.auto_filter.ref = f"A1:{get_column_letter(ws3.max_column)}{ws3.max_row}"
 
+    # ── Sheet4: 大货表遗漏预警 ─────────────────────────────────────────
+    if omitted_details is None:
+        omitted_details = []
+        
+    ws4 = wb.create_sheet('大货表遗漏预警')
+    headers4 = ['款号', 'SKC', '颜色', '到货日期', '微信下单数', '负责人', '生产工厂', '微信来源文件', '处理建议']
+    ws4.append(headers4)
+    for ci, h in enumerate(headers4, 1):
+        cell = ws4.cell(1, ci)
+        cell.fill = hf; cell.font = hfont
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = tb
+
+    # 填充淡红色突出警告
+    fill_color = 'F4CCCC'
+    for item in omitted_details:
+        deliv_str = item['delivery'].strftime('%Y-%m-%d') if isinstance(item['delivery'], datetime) else str(item['delivery'])
+        row = [
+            item['code'], item['skc'], item['color'], deliv_str,
+            round(item['qty'], 0), item['owner'], item['factory'], item['source'],
+            '⚠️ 大货总进度表中遗漏该款翻单，请补登此款'
+        ]
+        ws4.append(row)
+        rn = ws4.max_row
+        for ci in range(1, len(headers4) + 1):
+            cell = ws4.cell(rn, ci)
+            cell.border = tb
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
+
+    cw4 = [10, 14, 10, 12, 10, 10, 10, 24, 28]
+    for ci, w in enumerate(cw4, 1):
+        ws4.column_dimensions[get_column_letter(ci)].width = w
+    ws4.freeze_panes = 'A2'
+    ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
+
     wb.save(out_path)
     logger.info("已保存: %s", out_path)
     return out_path
@@ -1584,15 +1829,17 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-        output_dir, sheet2_data, whEntityTotal, product_table, wh_file = analyze()
+        output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
         unmatched = {k: v for k, v in unmatched.items() if args.skc in k}
+        if omitted_details:
+            omitted_details = [o for o in omitted_details if args.skc in o['skc']]
 
     if results or unmatched:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
-                        scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file)
+                        scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details)
         logger.info("完成: 窗口期到货%d条 | 库存回补%d条 | 无翻单%d条",
                     len(results), len(sheet2_data), len(unmatched))
     else:
