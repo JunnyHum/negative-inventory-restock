@@ -1742,7 +1742,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     # ── Sheet1: 窗口期到货 ───────────────────────────────────────────
     ws1 = wb.active
     ws1.title = '窗口期到货'
-    headers1 = ['款号', 'SKC编码', '具体颜色', '颜色分类', '仓库可销',
+    headers1 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次数量', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '到货日期', '生产状态', '工厂']
@@ -1758,11 +1758,10 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_total  = neg_skcs.get(skc, 0)
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
-        color_cat = get_color_category_name(wh_color, skc)
         entity   = whEntityTotal.get(skc, 0)
 
         row = [
-            skc[:8], skc, wh_color, color_cat,
+            skc[:8], skc, wh_color,
             round(wh_total, 0),
             round(wh_sizes.get('S', 0), 0), round(wh_sizes.get('M', 0), 0),
             round(wh_sizes.get('L', 0), 0), round(wh_sizes.get('XL', 0), 0),
@@ -1788,7 +1787,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw1 = [10, 14, 10, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 8]
+    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 8]
     for ci, w in enumerate(cw1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
     ws1.freeze_panes = 'A2'
@@ -1903,7 +1902,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         omitted_details = []
         
     ws4 = wb.create_sheet('大货表遗漏预警')
-    headers4 = ['款号', 'SKC', '具体颜色', '颜色分类', '到货日期', '微信下单数', '负责人', '生产工厂', '微信来源文件', '处理建议']
+    headers4 = ['款号', 'SKC', '颜色', '到货日期', '微信下单数', '负责人', '生产工厂', '微信来源文件', '处理建议']
     ws4.append(headers4)
     for ci, h in enumerate(headers4, 1):
         cell = ws4.cell(1, ci)
@@ -1915,9 +1914,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     fill_color = 'F4CCCC'
     for item in omitted_details:
         deliv_str = item['delivery'].strftime('%Y-%m-%d') if isinstance(item['delivery'], datetime) else str(item['delivery'])
-        color_cat = get_color_category_name(item['color'], item['skc'])
         row = [
-            item['code'], item['skc'], item['color'], color_cat, deliv_str,
+            item['code'], item['skc'], item['color'], deliv_str,
             round(item['qty'], 0), item['owner'], item['factory'], item['source'],
             '⚠️ 大货总进度表中遗漏该款翻单，请补登此款'
         ]
@@ -1929,7 +1927,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw4 = [10, 14, 10, 10, 12, 10, 10, 10, 24, 28]
+    cw4 = [10, 14, 10, 12, 10, 10, 10, 24, 28]
     for ci, w in enumerate(cw4, 1):
         ws4.column_dimensions[get_column_letter(ci)].width = w
     ws4.freeze_panes = 'A2'
@@ -1942,7 +1940,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_neg_total = {}
 
     ws5 = wb.create_sheet('客服专用_到货参考')
-    headers5 = ['款号', 'SKC编码', '具体颜色', '颜色分类', '仓库可销',
+    headers5 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次到货数量', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '预计到货日期', '生产状态', '工厂', '翻单数据源']
@@ -1958,10 +1956,9 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_total  = wh_neg_total.get(skc, 0)
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
-        color_cat = get_color_category_name(wh_color, skc)
 
         row = [
-            skc[:8], skc, wh_color, color_cat,
+            skc[:8], skc, wh_color,
             round(wh_total, 0),
             round(wh_sizes.get('S', 0), 0), round(wh_sizes.get('M', 0), 0),
             round(wh_sizes.get('L', 0), 0), round(wh_sizes.get('XL', 0), 0),
@@ -1982,7 +1979,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw5 = [10, 14, 10, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
+    cw5 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
     for ci, w in enumerate(cw5, 1):
         ws5.column_dimensions[get_column_letter(ci)].width = w
     ws5.freeze_panes = 'A2'
