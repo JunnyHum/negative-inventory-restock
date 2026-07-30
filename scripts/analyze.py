@@ -1712,7 +1712,7 @@ def analyze():
         if w_qty <= 0:
             continue
             
-        # 在 master_records_db 中进行【款 + 色 + 到货日期 + 数量】四维严格比对
+        # 在 master_records_db 中进行【下单时间/文件日期 + 货期/到货日期 + 款 + 色】严格比对
         is_fully_matched = False
         w_deliv_date = actual_date.date() if isinstance(actual_date, datetime) else (actual_date if isinstance(actual_date, date) else None)
         
@@ -1728,10 +1728,10 @@ def analyze():
                 c_match = True
             if not c_match:
                 continue
-            # 3. 排除已显式结清的历史旧批次
+            # 3. 排除已显式标记清完结清的历史旧批次
             if m['is_cleared']:
                 continue
-            # 4. 到货日期/交期匹配 (交期相差 25 天以内或其中一个为空)
+            # 4. 到货日期/货期匹配 (交期相差 25 天以内或其中一个为空)
             d_match = True
             m_deliv_date = m['date'].date() if isinstance(m['date'], datetime) else (m['date'] if isinstance(m['date'], date) else None)
             if w_deliv_date and m_deliv_date:
@@ -1739,14 +1739,8 @@ def analyze():
                     d_match = False
             if not d_match:
                 continue
-            # 5. 数量匹配 (数量相差 40% 以内或其中一个为 0)
-            q_match = True
-            if w_qty > 0 and m['qty'] > 0:
-                if abs(w_qty - m['qty']) / max(w_qty, m['qty']) > 0.4:
-                    q_match = False
-            if not q_match:
-                continue
                 
+            # 【下单时间/货期 + 款 + 色】全符合，即使下单数量有轻微出入，也认定已在大货总表登记
             is_fully_matched = True
             break
             
