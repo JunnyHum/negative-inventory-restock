@@ -629,6 +629,9 @@ def findColumnIndexes(headerCells: list) -> dict:
             indexes['code'] = idx
         elif val == '颜色':
             indexes['color'] = idx
+        elif val in ['条码', '规格编码', '条形码', 'sku条码']:
+            # NOTE: 条码列（12位 SKC）可作为颜色编号提取的备选来源，第 8~10 位即颜色编号
+            indexes['spec'] = idx
         elif val == '工厂':
             indexes['factory'] = idx
         elif val in ['出货数量', '总出货', '已出货']:
@@ -1145,10 +1148,19 @@ def analyze():
                     continue
                 master_progress_codes.add(pc)
 
+                # 颜色编号提取双源兼容：
+                # 来源1: 颜色字段 [XX] 正则
+                # 来源2: 条码列第 8~10 位（一个条码只代表一个尺码，可代表整款颜色）
                 color_raw = str(rd_raw[sg_indexes['color']]) if rd_raw[sg_indexes['color']] else ''
                 mc_raw = re.search(r'\[(\d+)\]', color_raw)
-                cc_raw = mc_raw.group(1) if mc_raw else '?'
-                if cc_raw != '?':
+                cc_raw = mc_raw.group(1) if mc_raw else None
+                if not cc_raw:
+                    spec_idx_sg = sg_indexes.get('spec')
+                    if spec_idx_sg is not None and len(rd_raw) > spec_idx_sg:
+                        spec_raw_sg = str(rd_raw[spec_idx_sg]).strip() if rd_raw[spec_idx_sg] else ''
+                        if len(spec_raw_sg) >= 10 and spec_raw_sg[8:10].isdigit():
+                            cc_raw = spec_raw_sg[8:10]
+                if cc_raw:
                     master_progress_skcs.add(pc + cc_raw)
                     
                 # 自适应换行拆分
@@ -1290,10 +1302,19 @@ def analyze():
                     continue
                 master_progress_codes.add(pc)
 
+                # 颜色编号提取双源兼容：
+                # 来源1: 颜色字段 [XX] 正则
+                # 来源2: 条码列第 8~10 位（尺码无关，只代表整款颜色）
                 color_raw2 = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
                 mc_raw2 = re.search(r'\[(\d+)\]', color_raw2)
-                cc_raw2 = mc_raw2.group(1) if mc_raw2 else '?'
-                if cc_raw2 != '?':
+                cc_raw2 = mc_raw2.group(1) if mc_raw2 else None
+                if not cc_raw2:
+                    spec_idx_nba = nba_indexes.get('spec')
+                    if spec_idx_nba is not None and len(rd) > spec_idx_nba:
+                        spec_raw_nba = str(rd[spec_idx_nba]).strip() if rd[spec_idx_nba] else ''
+                        if len(spec_raw_nba) >= 10 and spec_raw_nba[8:10].isdigit():
+                            cc_raw2 = spec_raw_nba[8:10]
+                if cc_raw2:
                     master_progress_skcs.add(pc + cc_raw2)
                     
                 # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
