@@ -1124,8 +1124,10 @@ def analyze():
 
     all_restock = {}  # {(skc, date): {...}}
     skc_has_any = set()
-    master_progress_skcs = set() # 存放所有在大货进度表中出现的 SKC 集合
+    master_progress_skcs = set() # 存放所有在大货进度表中出现的 SKC 集合 (含历史已结清)
     master_progress_codes = set() # 存放所有在大货进度表中出现的款号集合
+    master_active_skcs = set() # 仅存放在大货进度表中【在途/未结清】的 SKC 集合
+    master_active_code_colors = set() # 仅存放在大货进度表中【在途/未结清】的 (款号, 颜色/颜色编号)
 
     # SG品牌进度表 (多文件与多 Sheet 自适应与日期回退)
     for sg_file in sg_files:
@@ -1146,8 +1148,6 @@ def analyze():
                 pc = str(rd_raw[sg_indexes['code']]).strip() if rd_raw[sg_indexes['code']] else ''
                 if not pc:
                     continue
-                master_progress_codes.add(pc)
-
                 # 颜色编号提取双源兼容：
                 # 来源1: 颜色字段 [XX] 正则
                 # 来源2: 条码列第 8~10 位（一个条码只代表一个尺码，可代表整款颜色）
@@ -1162,6 +1162,9 @@ def analyze():
                             cc_raw = spec_raw_sg[8:10]
                 if cc_raw:
                     master_progress_skcs.add(pc + cc_raw)
+                    
+                # 全量款号登记 (供新品/铺货审计使用)
+                master_progress_codes.add(pc)
                     
                 # 自适应换行拆分
                 sub_rds = split_row_by_newline(rd_raw, sg_indexes)
@@ -1179,7 +1182,7 @@ def analyze():
                         if any(x in cleared_val for x in ['清', '是', '已清', '完']):
                             is_shipped_clean = True
                     
-                    # 2. 备选：如果出货量大于等于总下单量，也视为结清
+                    # 2. 备选：必须同时存在总下单量且出货量 >= 总下单量，才判定为结清
                     if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
                         shipped = rd[shipped_idx]
                         if shipped is not None and shipped != '':
@@ -1191,17 +1194,20 @@ def analyze():
                                         if total_qty_val > 0 and shipped_val >= total_qty_val:
                                             is_shipped_clean = True
                                     except ValueError:
-                                        # 如果总下单列的值无法转为数值，则退避到出货量 > 0 即判定
-                                        if shipped_val > 0:
-                                            is_shipped_clean = True
-                                else:
-                                    # 兜底：如果没有总下单列，只要总出货 > 0 也判定出货已清
-                                    if shipped_val > 0:
-                                        is_shipped_clean = True
+                                        pass
                             except ValueError:
                                 pass
-                    
-                    if is_shipped_clean:
+                                
+                    # 关键逻辑：只有在途/未结清的记录，才是大货进度表中有效登记的翻单！
+                    if not is_shipped_clean:
+                        if cc_raw:
+                            master_active_skcs.add(pc + cc_raw)
+                        color_clean = re.sub(r'\[\d+\]', '', color_raw).strip()
+                        if color_clean:
+                            master_active_code_colors.add((pc, color_clean))
+                            if cc_raw:
+                                master_active_code_colors.add((pc, cc_raw))
+                    else:
                         continue
                                 
                     color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
@@ -1300,8 +1306,6 @@ def analyze():
                 pc = str(rd[nba_indexes['code']]).strip() if rd[nba_indexes['code']] else ''
                 if not pc:
                     continue
-                master_progress_codes.add(pc)
-
                 # 颜色编号提取双源兼容：
                 # 来源1: 颜色字段 [XX] 正则
                 # 来源2: 条码列第 8~10 位（尺码无关，只代表整款颜色）
@@ -1316,6 +1320,47 @@ def analyze():
                             cc_raw2 = spec_raw_nba[8:10]
                 if cc_raw2:
                     master_progress_skcs.add(pc + cc_raw2)
+                    
+                master_progress_codes.add(pc)
+                    
+                # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
+                shipped_idx = nba_indexes['shipped']
+                cleared_idx = nba_indexes.get('cleared')
+                total_qty_idx = nba_indexes.get('total_qty')
+                
+                is_shipped_clean = False
+                
+                # 1. 优先通过 "是否清完" 列进行结清打标判定
+                if cleared_idx is not None and len(rd) > cleared_idx:
+                    cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
+                    if any(x in cleared_val for x in ['清', '是', '已清', '完']):
+                        is_shipped_clean = True
+                
+                # 2. 备选：必须同时存在总下单量且出货量 >= 总下单量，才判定为结清
+                if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
+                    shipped = rd[shipped_idx]
+                    if shipped is not None and shipped != '':
+                        try:
+                            shipped_val = float(shipped)
+                            if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                                try:
+                                    total_qty_val = float(rd[total_qty_idx])
+                                    if total_qty_val > 0 and shipped_val >= total_qty_val:
+                                        is_shipped_clean = True
+                                except ValueError:
+                                    pass
+                        except ValueError:
+                            pass
+                            
+                # 关键逻辑：只有在途/未结清的记录，才是大货进度表中有效登记的翻单！
+                if not is_shipped_clean:
+                    if cc_raw2:
+                        master_active_skcs.add(pc + cc_raw2)
+                    color_clean2 = re.sub(r'\[\d+\]', '', color_raw2).strip()
+                    if color_clean2:
+                        master_active_code_colors.add((pc, color_clean2))
+                        if cc_raw2:
+                            master_active_code_colors.add((pc, cc_raw2))
                     
                 # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
                 shipped_idx = nba_indexes['shipped']
@@ -1622,17 +1667,39 @@ def analyze():
                 })
     logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
 
-    # 跨源交叉审计：提取被大货进度表完全遗漏的微信活跃翻单
+    # 跨源交叉审计：提取被两张大货进度表完全遗漏的微信活跃翻单
+    # 黄金准则：只有当两张大货总进度表（SG进度表与NBA专供进度表）中全都没有出现该款色（SKC）信息时，才判定为「遗漏未登记，需补录入」
     omitted_details = []
+    seen_omitted_skcs = set()
+    
     for (skc, actual_date), d in all_restock.items():
-        if skc and skc not in master_progress_skcs:
+        if not skc or not d.get('source'):
+            continue
+            
+        pc = skc[:8]
+        cc = skc[8:10] if len(skc) >= 10 and skc[8:10].isdigit() else None
+        color_txt = str(d.get('color', '')).strip()
+        color_clean = re.sub(r'\[\d+\]', '', color_txt).strip()
+        
+        # 检查是否在大货总集中存在
+        in_master = False
+        if skc in master_progress_skcs:
+            in_master = True
+        elif cc and (pc + cc) in master_progress_skcs:
+            in_master = True
+            
+        if not in_master:
+            if skc in seen_omitted_skcs:
+                continue
+            seen_omitted_skcs.add(skc)
+            
             total_qty = sum(d['sizes'].values())
-            if total_qty > 0 and d.get('source'):
+            if total_qty > 0:
                 owner = d.get('status') or ''
                 omitted_details.append({
                     'skc': skc,
-                    'code': skc[:8],
-                    'color': wh_colors_txt.get(skc, d.get('color', '')),
+                    'code': pc,
+                    'color': wh_colors_txt.get(skc, color_txt),
                     'delivery': actual_date,
                     'qty': total_qty,
                     'owner': owner,
