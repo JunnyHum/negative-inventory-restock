@@ -978,7 +978,7 @@ def analyze():
 
     # 动态窗口期：今天前10天 ~ 今天后15天
     window_start = today - timedelta(days=10)
-    window_end   = today + timedelta(days=15)
+    window_end   = today + timedelta(days=25)
     logger.info("窗口期: %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
 
     # ── 1. 加载当前仓库 ──────────────────────────────────────────────
@@ -1344,13 +1344,14 @@ def analyze():
             return (file_year == now_year) and (file_week == now_week)
 
         def get_group_key(filename):
-            # 1. 提取负责人
+            base = os.path.splitext(filename)[0]
             owner = 'default'
-            m = re.search(r'[\(（]([^\(\)（）]+)[\)）]', filename)
-            if m:
-                owner = m.group(1).strip()
+            m_owner = re.search(r'[\(（]([^\(\)（）]+)[\)）]', filename)
+            if m_owner:
+                owner = m_owner.group(1).strip()
+                owner = re.sub(r'\d+', '', owner).strip()
+                if not owner: owner = 'default'
                 
-            # 2. 提取品牌 (SG / NBA)
             brand = 'unknown'
             filename_upper = filename.upper()
             if 'SG' in filename_upper:
@@ -1358,7 +1359,6 @@ def analyze():
             elif 'NBA' in filename_upper:
                 brand = 'NBA'
             else:
-                base = os.path.splitext(filename)[0]
                 base_clean = re.sub(r'[\(（].*?[\)）]', '', base)
                 base_clean = re.sub(r'\d+', '', base_clean)
                 base_clean = base_clean.replace('翻单', '').replace('电商款', '').replace('年', '').replace(' ', '')
@@ -1366,22 +1366,62 @@ def analyze():
                 
             return f"{brand}_{owner}"
 
+        def get_version_family_key(filename, filepath=None):
+            """提取版本家族 key，优先从 Excel 内容标题行读取真实日期（解决文件名与内容日期不一致问题）。
+            例如：文件名 SG26年电商款翻单0728（桥）.xlsx，但内容第1行为 SG电商专供款翻单0729（桥），
+            则应识别为 0729 而非 0728，避免与真实的 0728 文件竞争。"""
+            base = os.path.splitext(filename)[0]
+            gk = get_group_key(filename)
+            date_str = None
+            
+            # NOTE: 优先尝试读取 Excel 内容标题行（第1行A1单元格）中的4位日期
+            if filepath:
+                try:
+                    import openpyxl
+                    _wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+                    _ws = _wb.active
+                    first_row = next(_ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+                    _wb.close()
+                    if first_row:
+                        title_str = ' '.join(str(c) for c in first_row if c is not None)
+                        m_title = re.search(r'\d{4}', title_str)
+                        if m_title:
+                            date_str = m_title.group(0)
+                except Exception:
+                    pass  # 读取失败时退回文件名解析
+            
+            # FALLBACK: 从文件名中提取4位数日期
+            if not date_str:
+                m_date = re.search(r'\d{4}', base)
+                date_str = m_date.group(0) if m_date else 'nodate'
+            
+            return f"{gk}_{date_str}"
+
         # 跟踪每个负责人 gk 分组中，各 SKU 在各到货日期的最后一次写入值，从而实现覆盖去重
         # 格式：{(gk, skc, size, delivery_date): {'qty': qty, 'status': status, 'factory': factory, 'is_missing_delivery': bool}}
         gk_sku_restock = {}
         
         # 1. 过滤：滚动加载最近 14 天内修改或接收的翻单文件，以确保上周活跃翻单不会丢失
         limit_time = today - timedelta(days=14)
-        valid_candidates = []
+        raw_candidates = []
         for filepath in candidates:
             basename = os.path.basename(filepath)
             if basename.startswith('~$') or basename.startswith('.~'):
                 continue
             mtime = os.path.getmtime(filepath)
             if datetime.fromtimestamp(mtime) >= limit_time:
-                valid_candidates.append((filepath, mtime))
+                raw_candidates.append((filepath, mtime))
                 
-        # 2. 对所有文件按修改时间从旧到新（升序）排列，使较新的文件覆盖旧文件中的重合记录
+        # 2. 版本系列文件去重：同一品牌+负责人+日期的多个副本文件（如带有 (1) 或修改时间不同的同名表），只保留最新的那一份
+        family_dict = {}
+        for filepath, mtime in raw_candidates:
+            basename = os.path.basename(filepath)
+            # NOTE: 传入 filepath 使得函数可以读取 Excel 内容标题行来提取真实日期
+            family_key = get_version_family_key(basename, filepath=filepath)
+            if family_key not in family_dict or mtime > family_dict[family_key][1]:
+                family_dict[family_key] = (filepath, mtime)
+                
+        valid_candidates = list(family_dict.values())
         valid_candidates.sort(key=lambda x: x[1])
         
         logger.info("自动过滤后待解析独立翻单文件共: %d个", len(valid_candidates))
