@@ -1128,6 +1128,7 @@ def analyze():
     master_progress_codes = set() # 存放所有在大货进度表中出现的款号集合
     master_active_skcs = set() # 仅存放在大货进度表中【在途/未结清】的 SKC 集合
     master_active_code_colors = set() # 仅存放在大货进度表中【在途/未结清】的 (款号, 颜色/颜色编号)
+    master_records_db = [] # 存放两张大货总表解析出的全量四维翻单条目数据库 [{'code', 'cc', 'color', 'date', 'qty'}]
 
     # SG品牌进度表 (多文件与多 Sheet 自适应与日期回退)
     for sg_file in sg_files:
@@ -1286,6 +1287,16 @@ def analyze():
                     if skc: 
                         skc_has_any.add(skc)
                         master_progress_skcs.add(skc)
+                        
+                    # 注册四维对账条目至数据库
+                    master_records_db.append({
+                        'code': pc,
+                        'cc': cc_raw,
+                        'color': color_clean,
+                        'date': actual_date,
+                        'qty': total_qty_val,
+                        'is_cleared': is_shipped_clean
+                    })
         wb1.close()
 
     # NBA翻单表 (多 Sheet 自适应与日期回退)
@@ -1435,6 +1446,20 @@ def analyze():
                 if skc: 
                     skc_has_any.add(skc)
                     master_progress_skcs.add(skc)
+                    
+                # 注册四维对账条目至数据库
+                total_qty_nba = 0
+                if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                    try: total_qty_nba = float(rd[total_qty_idx])
+                    except: pass
+                master_records_db.append({
+                    'code': pc,
+                    'cc': cc_raw2,
+                    'color': color_clean2,
+                    'date': actual_date,
+                    'qty': total_qty_nba,
+                    'is_cleared': is_shipped_clean
+                })
         wb2.close()
 
     # ── 3.5 扫描并加载独立翻单表 ──────────────────────────────────────
@@ -1668,7 +1693,10 @@ def analyze():
     logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
 
     # 跨源交叉审计：提取被两张大货进度表完全遗漏的微信活跃翻单
-    # 黄金准则：只有当两张大货总进度表（SG进度表与NBA专供进度表）中全都没有出现该款色（SKC）信息时，才判定为「遗漏未登记，需补录入」
+    # 黄金准则（严格四维匹配算法）：
+    #   必须同时匹配 款号 + 颜色/编号 + 预计到货日期 + 下单数量！
+    #   只有在大货总表中能找到在途/相近交期且数量吻合的翻单记录时，才判定为「已登记」；
+    #   否则，凡是不一致或找不到对应翻单批次的，一律判定为「大货表遗漏/未录入」，提报预警！
     omitted_details = []
     seen_omitted_skcs = set()
     
@@ -1680,32 +1708,65 @@ def analyze():
         cc = skc[8:10] if len(skc) >= 10 and skc[8:10].isdigit() else None
         color_txt = str(d.get('color', '')).strip()
         color_clean = re.sub(r'\[\d+\]', '', color_txt).strip()
+        w_qty = sum(d['sizes'].values())
+        if w_qty <= 0:
+            continue
+            
+        # 在 master_records_db 中进行【款 + 色 + 到货日期 + 数量】四维严格比对
+        is_fully_matched = False
+        w_deliv_date = actual_date.date() if isinstance(actual_date, datetime) else (actual_date if isinstance(actual_date, date) else None)
         
-        # 检查是否在大货总集中存在
-        in_master = False
-        if skc in master_progress_skcs:
-            in_master = True
-        elif cc and (pc + cc) in master_progress_skcs:
-            in_master = True
-            
-        if not in_master:
-            if skc in seen_omitted_skcs:
+        for m in master_records_db:
+            # 1. 款匹配
+            if m['code'] != pc:
                 continue
-            seen_omitted_skcs.add(skc)
+            # 2. 色匹配
+            c_match = False
+            if cc and m['cc'] == cc:
+                c_match = True
+            elif color_clean and m['color'] == color_clean:
+                c_match = True
+            if not c_match:
+                continue
+            # 3. 排除已显式结清的历史旧批次
+            if m['is_cleared']:
+                continue
+            # 4. 到货日期/交期匹配 (交期相差 25 天以内或其中一个为空)
+            d_match = True
+            m_deliv_date = m['date'].date() if isinstance(m['date'], datetime) else (m['date'] if isinstance(m['date'], date) else None)
+            if w_deliv_date and m_deliv_date:
+                if abs((w_deliv_date - m_deliv_date).days) > 25:
+                    d_match = False
+            if not d_match:
+                continue
+            # 5. 数量匹配 (数量相差 40% 以内或其中一个为 0)
+            q_match = True
+            if w_qty > 0 and m['qty'] > 0:
+                if abs(w_qty - m['qty']) / max(w_qty, m['qty']) > 0.4:
+                    q_match = False
+            if not q_match:
+                continue
+                
+            is_fully_matched = True
+            break
             
-            total_qty = sum(d['sizes'].values())
-            if total_qty > 0:
-                owner = d.get('status') or ''
-                omitted_details.append({
-                    'skc': skc,
-                    'code': pc,
-                    'color': wh_colors_txt.get(skc, color_txt),
-                    'delivery': actual_date,
-                    'qty': total_qty,
-                    'owner': owner,
-                    'factory': d.get('factory') or '',
-                    'source': d.get('source') or ''
-                })
+        if not is_fully_matched:
+            omitted_key = (skc, w_deliv_date)
+            if omitted_key in seen_omitted_skcs:
+                continue
+            seen_omitted_skcs.add(omitted_key)
+            
+            owner = d.get('status') or ''
+            omitted_details.append({
+                'skc': skc,
+                'code': pc,
+                'color': wh_colors_txt.get(skc, color_txt),
+                'delivery': actual_date,
+                'qty': w_qty,
+                'owner': owner,
+                'factory': d.get('factory') or '',
+                'source': d.get('source') or ''
+            })
 
     # ── 4. 窗口期过滤 ─────────────────────────────────────────────────
     results = []
