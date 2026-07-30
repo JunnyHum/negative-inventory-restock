@@ -978,7 +978,7 @@ def analyze():
 
     # 动态窗口期：今天前10天 ~ 今天后15天
     window_start = today - timedelta(days=10)
-    window_end   = today + timedelta(days=25)
+    window_end   = today + timedelta(days=15)
     logger.info("窗口期: %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
 
     # ── 1. 加载当前仓库 ──────────────────────────────────────────────
