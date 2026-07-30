@@ -852,9 +852,21 @@ def parse_individual_restock_file(filepath):
                 continue
                 
             color = str(rd[indexes['color']]) if rd[indexes['color']] else ''
+            
+            # NOTE: 双重验证颜色编号 —— 两路来源互为兜底，防止遗漏
+            # 来源1: 颜色字段中的 [XX] 格式编号（如 [03]本白 -> '03'）
+            # 来源2: 条码列（12位规格码 = 款号8位+颜色2位+尺码2位）第8~10位
+            cc_candidates = set()
             mc = re.search(r'\[(\d+)\]', color)
-            cc = mc.group(1) if mc else '?'
-            skc = pc + cc
+            if mc:
+                cc_candidates.add(mc.group(1))
+            if indexes.get('spec') is not None and len(rd) > indexes['spec']:
+                spec_raw = str(rd[indexes['spec']]).strip() if rd[indexes['spec']] else ''
+                if len(spec_raw) == 12 and spec_raw[:8] == pc:
+                    cc_candidates.add(spec_raw[8:10])
+            # 两路都失败时保留 '?' 占位，便于后续排查
+            if not cc_candidates:
+                cc_candidates.add('?')
             
             size_raw = rd[indexes['size']]
             size_name = parse_size_name_from_text(size_raw)
@@ -899,15 +911,18 @@ def parse_individual_restock_file(filepath):
                 
             if qty_val <= 0:
                 continue
-                
-            records.append({
-                'skc': skc,
-                'size': size_name,
-                'qty': qty_val,
-                'delivery': delivery_date,
-                'factory': factory,
-                'status': status
-            })
+            
+            # 对每个颜色编号来源各注册一条翻单记录（去重由外层 gk_sku_restock 字典保证）
+            for cc in cc_candidates:
+                skc = pc + cc
+                records.append({
+                    'skc': skc,
+                    'size': size_name,
+                    'qty': qty_val,
+                    'delivery': delivery_date,
+                    'factory': factory,
+                    'status': status
+                })
             
     wb.close()
     return records
