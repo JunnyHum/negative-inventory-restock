@@ -1144,6 +1144,12 @@ def analyze():
                 if not pc:
                     continue
                 master_progress_codes.add(pc)
+
+                color_raw = str(rd_raw[sg_indexes['color']]) if rd_raw[sg_indexes['color']] else ''
+                mc_raw = re.search(r'\[(\d+)\]', color_raw)
+                cc_raw = mc_raw.group(1) if mc_raw else '?'
+                if cc_raw != '?':
+                    master_progress_skcs.add(pc + cc_raw)
                     
                 # 自适应换行拆分
                 sub_rds = split_row_by_newline(rd_raw, sg_indexes)
@@ -1283,6 +1289,12 @@ def analyze():
                 if not pc:
                     continue
                 master_progress_codes.add(pc)
+
+                color_raw2 = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
+                mc_raw2 = re.search(r'\[(\d+)\]', color_raw2)
+                cc_raw2 = mc_raw2.group(1) if mc_raw2 else '?'
+                if cc_raw2 != '?':
+                    master_progress_skcs.add(pc + cc_raw2)
                     
                 # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
                 shipped_idx = nba_indexes['shipped']
@@ -1739,6 +1751,49 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     tb   = Border(left=Side(style='thin'), right=Side(style='thin'),
                   top=Side(style='thin'),   bottom=Side(style='thin'))
 
+    def draw_legend_box(ws, start_col_idx, legend_items, title="🎨 填充颜色含义告示板"):
+        """在 worksheet 的右侧空列放置美观的图例告示区，方便用户和客服直接对照理解。"""
+        header_fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True, size=10)
+        thin_border = Border(left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'),
+                             top=Side(style='thin', color='D9D9D9'), bottom=Side(style='thin', color='D9D9D9'))
+        
+        c1 = start_col_idx
+        c2 = start_col_idx + 1
+        
+        # 标题行 (第1行合并)
+        ws.merge_cells(start_row=1, start_column=c1, end_row=1, end_column=c2)
+        t_cell = ws.cell(1, c1)
+        t_cell.value = title
+        t_cell.fill = header_fill
+        t_cell.font = header_font
+        t_cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.cell(1, c2).border = thin_border
+        t_cell.border = thin_border
+        
+        ws.row_dimensions[1].height = 24
+        
+        for i, (fill_hex, label, desc) in enumerate(legend_items, start=2):
+            cell_color = ws.cell(i, c1)
+            cell_desc  = ws.cell(i, c2)
+            
+            cell_color.value = label
+            cell_color.fill = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type='solid')
+            cell_color.font = Font(bold=True, size=9)
+            cell_color.alignment = Alignment(horizontal='center', vertical='center')
+            cell_color.border = thin_border
+            
+            cell_desc.value = desc
+            cell_desc.font = Font(size=9)
+            cell_desc.alignment = Alignment(horizontal='left', vertical='center')
+            cell_desc.border = thin_border
+            
+            ws.row_dimensions[i].height = 20
+
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(c1)].width = 24
+        ws.column_dimensions[get_column_letter(c2)].width = 46
+
     # ── Sheet1: 窗口期到货 ───────────────────────────────────────────
     ws1 = wb.active
     ws1.title = '窗口期到货'
@@ -1792,6 +1847,13 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ws1.column_dimensions[get_column_letter(ci)].width = w
     ws1.freeze_panes = 'A2'
     ws1.auto_filter.ref = f"A1:{get_column_letter(ws1.max_column)}{ws1.max_row}"
+
+    # 绘制 Sheet1 右侧告示区
+    draw_legend_box(ws1, 22, [
+        ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
+        ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
+        ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货')
+    ], title="🎨 到货跟进告示板")
 
     # ── Sheet2: 库存回补 ─────────────────────────────────────────────
     ws2 = wb.create_sheet('库存回补')
@@ -1863,6 +1925,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws2.freeze_panes = 'A2'
     ws2.auto_filter.ref = f"A1:{get_column_letter(ws2.max_column)}{ws2.max_row}"
 
+    # 绘制 Sheet2 右侧告示区
+    draw_legend_box(ws2, 24, [
+        ('FFF2CC', '🟡 📦 开启商品同步', '最高优先级！需立即去 JEOMS / 千牛后台开启自动上传同步'),
+        ('E2EFDA', '🟢 🌟 大货新品到仓(待上架)', '仓库已实际扫码入库的大货新品，准备安排商品上架'),
+        ('DAEFCE', '🌿 🚀 自动铺货(新品预售)', '新品预售商品到仓回补'),
+        ('F4CCCC', '🔴 ❓ 异常新品到仓', '扫码入库但商品表中尚未查到信息的异常款，需运营核对')
+    ], title="🎨 铺货与商品同步告示板")
+
     # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
     ws3 = wb.create_sheet('无翻单需评分')
     headers3 = ['款号', 'SKC', '仓库可销', '综合评分',
@@ -1933,6 +2003,11 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws4.freeze_panes = 'A2'
     ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
+    # 绘制 Sheet4 右侧告示区
+    draw_legend_box(ws4, 11, [
+        ('F4CCCC', '🔴 ⚠️ 翻单遗漏警告', '微信群中有下单记录，但生产大货总进度表中漏登，需负责人补登')
+    ], title="🎨 大货表审计告示区")
+
     # ── Sheet5: 客服专用_到货参考 ───────────────────────────────────────
     if customer_results is None:
         customer_results = []
@@ -1984,6 +2059,13 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ws5.column_dimensions[get_column_letter(ci)].width = w
     ws5.freeze_panes = 'A2'
     ws5.auto_filter.ref = f"A1:{get_column_letter(ws5.max_column)}{ws5.max_row}"
+
+    # 绘制 Sheet5 右侧客服专属告示区
+    draw_legend_box(ws5, 23, [
+        ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
+        ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
+        ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
+    ], title="🎨 客服查货与预售指引告示区")
 
     wb.save(out_path)
     logger.info("已保存: %s", out_path)
