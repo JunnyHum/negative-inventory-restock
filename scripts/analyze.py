@@ -1571,9 +1571,12 @@ def analyze():
 
     # ── 4. 窗口期过滤 ─────────────────────────────────────────────────
     results = []
+    customer_results = []
+    customer_window_end = today + timedelta(days=20)
+    logger.info("客服专用到货参考窗口期: %s ~ %s", window_start.strftime('%m/%d'), customer_window_end.strftime('%m/%d'))
+
     for (skc, actual_date), d in all_restock.items():
         total = sum(d['sizes'].values())
-        if skc not in neg_skcs: continue
         if total <= 0: continue
         if actual_date is None: continue
         if not isinstance(actual_date, datetime):
@@ -1581,6 +1584,19 @@ def analyze():
                 actual_date = datetime.strptime(str(actual_date), '%Y-%m-%d')
             except (ValueError, TypeError):
                 continue
+
+        # 客服专用参考：不限定 skc in neg_skcs，窗口期覆盖到往后 20 天（today+20天）
+        if window_start <= actual_date <= customer_window_end:
+            d_cust = dict(d)
+            if d.get('is_missing_delivery'):
+                d_cust['delivery'] = '交期未填/待定'
+            else:
+                d_cust['delivery'] = actual_date.strftime('%Y-%m-%d')
+            d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
+            customer_results.append((skc, actual_date, d_cust))
+
+        # 标准窗口期到货（原 Sheet1 逻辑：需满足 skc in neg_skcs 且在标准 window_end 内）
+        if skc not in neg_skcs: continue
         if window_start <= actual_date <= window_end:
             d2 = dict(d)
             if d.get('is_missing_delivery'):
@@ -1596,6 +1612,10 @@ def analyze():
                 
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
+
+    # 客服专用参考按 (款号, 到货日期, SKC) 排序
+    customer_results.sort(key=lambda x: (x[0][:8], x[2].get('delivery', ''), x[0]))
+    logger.info("客服专用到货参考全量摘录: %d条", len(customer_results))
 
     # ── 5. 近似颜色匹配（P0 功能） ──────────────────────────────────────
     approxMatches = findApproxColorMatches(neg_skcs, all_restock, skc_has_any)
@@ -1645,11 +1665,13 @@ def analyze():
     scores   = score_and_advise(unmatched, biz_data)
 
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-           paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details
+           paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
+           customer_results, wh_neg_total
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
-             output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None, omitted_details=None):
+             output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None, omitted_details=None,
+             customer_results=None, wh_neg_total=None):
     from datetime import datetime
     import re
     
@@ -1873,6 +1895,58 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws4.freeze_panes = 'A2'
     ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
+    # ── Sheet5: 客服专用_到货参考 ───────────────────────────────────────
+    if customer_results is None:
+        customer_results = []
+    if wh_neg_total is None:
+        wh_neg_total = {}
+
+    ws5 = wb.create_sheet('客服专用_到货参考')
+    headers5 = ['款号', 'SKC编码', '颜色', '仓库可销',
+                 'S', 'M', 'L', 'XL', '2XL', '均码',
+                 '批次到货数量', 'S', 'M', 'L', 'XL', '2XL', '均码',
+                 '预计到货日期', '生产状态', '工厂', '翻单数据源']
+    ws5.append(headers5)
+    for ci, h in enumerate(headers5, 1):
+        cell = ws5.cell(1, ci)
+        cell.fill = hf; cell.font = hfont
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = tb
+
+    for skc, actual_date, d in customer_results:
+        restock_total = sum(d['sizes'].values())
+        wh_total  = wh_neg_total.get(skc, 0)
+        wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
+        wh_color = wh_colors_txt.get(skc, d.get('color', ''))
+
+        row = [
+            skc[:8], skc, wh_color,
+            round(wh_total, 0),
+            round(wh_sizes.get('S', 0), 0), round(wh_sizes.get('M', 0), 0),
+            round(wh_sizes.get('L', 0), 0), round(wh_sizes.get('XL', 0), 0),
+            round(wh_sizes.get('2XL', 0), 0), round(wh_sizes.get('均码', 0), 0),
+            round(restock_total, 0),
+            round(d['sizes'].get('S', 0), 0), round(d['sizes'].get('M', 0), 0),
+            round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
+            round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
+            d.get('delivery', ''), d.get('status', ''), d.get('factory', ''), d.get('source', '')
+        ]
+        ws5.append(row)
+        rn = ws5.max_row
+        
+        fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
+        for ci in range(1, len(headers5) + 1):
+            cell = ws5.cell(rn, ci)
+            cell.border = tb
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
+
+    cw5 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
+    for ci, w in enumerate(cw5, 1):
+        ws5.column_dimensions[get_column_letter(ci)].width = w
+    ws5.freeze_panes = 'A2'
+    ws5.auto_filter.ref = f"A1:{get_column_letter(ws5.max_column)}{ws5.max_row}"
+
     wb.save(out_path)
     logger.info("已保存: %s", out_path)
     return out_path
@@ -1884,18 +1958,22 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
-        output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details = analyze()
+        output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
+        customer_results, wh_neg_total = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
         unmatched = {k: v for k, v in unmatched.items() if args.skc in k}
         if omitted_details:
             omitted_details = [o for o in omitted_details if args.skc in o['skc']]
+        if customer_results:
+            customer_results = [c for c in customer_results if args.skc in c[0]]
 
-    if results or unmatched:
+    if results or unmatched or customer_results:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
-                        scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details)
-        logger.info("完成: 窗口期到货%d条 | 库存回补%d条 | 无翻单%d条",
-                    len(results), len(sheet2_data), len(unmatched))
+                        scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details,
+                        customer_results, wh_neg_total)
+        logger.info("完成: 窗口期到货%d条 | 客服参考%d条 | 库存回补%d条 | 无翻单%d条",
+                    len(results), len(customer_results), len(sheet2_data), len(unmatched))
     else:
         logger.info("无数据")
