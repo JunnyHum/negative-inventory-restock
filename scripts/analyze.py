@@ -823,7 +823,11 @@ def parse_individual_restock_file(filepath):
         # 1. 寻找表头行
         header_row = None
         for r in range(1, 15):
-            row_cells = [cell.value for cell in next(ws.iter_rows(min_row=r, max_row=r))]
+            row_iter = ws.iter_rows(min_row=r, max_row=r)
+            first_item = next(row_iter, None)
+            if not first_item:
+                continue
+            row_cells = [cell.value for cell in first_item]
             if not any(row_cells):
                 continue
             row_str = [str(x).strip() for x in row_cells if x is not None]
@@ -834,7 +838,10 @@ def parse_individual_restock_file(filepath):
         if not header_row:
             continue
             
-        header = [cell.value for cell in next(ws.iter_rows(min_row=header_row, max_row=header_row))]
+        header_item = next(ws.iter_rows(min_row=header_row, max_row=header_row), None)
+        if not header_item:
+            continue
+        header = [cell.value for cell in header_item]
         
         # 2. 定位关键列
         indexes = {
@@ -1625,29 +1632,55 @@ def analyze():
             except Exception as ex:
                 logger.error("  解析独立翻单表 %s 失败: %s", basename, ex)
                 
-        # 3. 汇总合并所有分组的去重翻单数据
-        for (gk, skc, sz, delivery_date), info in gk_sku_restock.items():
-            key = (skc, delivery_date)
-            if key not in all_restock:
-                all_restock[key] = {
-                    'sizes': {k: 0 for k in SIZE_KEYS},
-                    'color': '',
-                    'status': '',
-                    'factory': '',
-                    'is_missing_delivery': False,
-                    'source': ''
-                }
-            if sz in all_restock[key]['sizes']:
-                all_restock[key]['sizes'][sz] += info['qty']
-                
-            if info['is_missing_delivery']:
-                all_restock[key]['is_missing_delivery'] = True
-            if info['status']:
-                all_restock[key]['status'] = info['status']
-            if info['factory']:
-                all_restock[key]['factory'] = info['factory']
-            if info.get('source'):
-                all_restock[key]['source'] = info['source']
+        # 3. 同一 (gk, skc, sz) 下各尺码数量完全一致但货期不同 → 合并取最晚货期
+        # NOTE: 先按 (gk, skc) 聚合所有 (delivery_date, sz) 的 qty 签名，
+        #       签名相同意味着"跨货期、各尺码下单量完全相等"，直接视为同一笔翻单被反复更新，
+        #       只保留货期最晚的那一条，避免重复计入翻单数量。
+        
+        # Step 3a：以 (gk, skc) 为 key，收集该 SKC 所有货期下的 {sz: qty} 快照
+        skc_date_sizes = defaultdict(dict)  # {(gk, skc, delivery_date): {sz: qty}}
+        skc_date_meta  = {}                 # {(gk, skc, delivery_date): info}
+        for (gk_k, skc_k, sz_k, del_k), info in gk_sku_restock.items():
+            skc_date_sizes[(gk_k, skc_k, del_k)][sz_k] = info['qty']
+            skc_date_meta [(gk_k, skc_k, del_k)] = info  # 同 (gk, skc, del_k) 内最后一次 sz 写入的 meta 共享
+        
+        # Step 3b：对每个 (gk, skc)，将所有货期版本的 qty_signature 分组
+        gk_skc_dates = defaultdict(list)    # {(gk, skc): [(delivery_date, qty_sig)]}
+        for (gk_k, skc_k, del_k), sizes in skc_date_sizes.items():
+            # qty 签名：将每个 sz→qty 排序后转为不可变 tuple，数量相同则签名相同
+            qty_sig = tuple(sorted(sizes.items()))
+            gk_skc_dates[(gk_k, skc_k)].append((del_k, qty_sig, sizes))
+        
+        # Step 3c：签名相同的多个货期条目 → 只保留货期最晚的
+        deduped_skc_date_sizes = {}  # {(gk, skc, delivery_date): {sz: qty}}  只剩代表条目
+        for (gk_k, skc_k), date_list in gk_skc_dates.items():
+            # 按签名分组
+            sig_groups = defaultdict(list)
+            for del_k, qty_sig, sizes in date_list:
+                sig_groups[qty_sig].append((del_k, sizes))
+            for qty_sig, same_sig_entries in sig_groups.items():
+                # 取该签名分组中货期最晚的条目作为代表条目
+                latest_del, latest_sizes = max(same_sig_entries, key=lambda x: x[0])
+                deduped_skc_date_sizes[(gk_k, skc_k, latest_del)] = latest_sizes
+
+        # Step 3d：写入去重后的翻单数据（各尺码数量直接赋值，不叠加——同一笔翻单取最晚货期后只保留一条）
+        for (gk_k, skc_k, delivery_date), sizes in deduped_skc_date_sizes.items():
+            meta = skc_date_meta.get((gk_k, skc_k, delivery_date), {})
+            is_missing = meta.get('is_missing_delivery', False)
+            key = (skc_k, delivery_date)
+            # NOTE: 直接覆盖写入，不使用 +=，因为相同签名的多个货期版本已折叠为一条最晚货期记录
+            sizes_filled = {k: 0 for k in SIZE_KEYS}
+            for sz_k, qty_v in sizes.items():
+                if sz_k in sizes_filled:
+                    sizes_filled[sz_k] = qty_v
+            all_restock[key] = {
+                'sizes': sizes_filled,
+                'color': '',
+                'status': meta.get('status', ''),
+                'factory': meta.get('factory', ''),
+                'is_missing_delivery': is_missing,
+                'source': meta.get('source', '')
+            }
                 
     except Exception as e:
         logger.error("扫描独立翻单表失败: %s", e)
