@@ -1839,9 +1839,50 @@ def analyze():
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
 
+    # ── 客服专用参考全局跨源尺码签名去重 ──
+    # 彻底解决同一 SKC 各尺码配码完全一致、由于跨表来源（微信散表 vs 大货总表）到货日期相差几开而产生的重复行陈列
+    cust_groups = defaultdict(list)
+    for skc_item, act_dt, d_item in customer_results:
+        # 提取各尺码数量 tuple 签名
+        sz_tuple = tuple(round(d_item['sizes'].get(k, 0), 0) for k in SIZE_KEYS)
+        cust_groups[(skc_item, sz_tuple)].append((skc_item, act_dt, d_item))
+
+    deduped_customer_results = []
+    for (skc_item, sz_tuple), item_list in cust_groups.items():
+        if len(item_list) == 1:
+            deduped_customer_results.append(item_list[0])
+        else:
+            # 存在多条各尺码数量完全一致的重合条目：
+            # 1. 优先选择到货日期明确且最晚的那一条作为代表（即最新调整校准后的货期）
+            # 2. 融合显示数据源（如 微信0724唐 + 大货表），避免客服混淆
+            best_entry = item_list[0]
+            max_dt = None
+            sources = []
+            
+            for it in item_list:
+                it_dt = it[1]
+                src = it[2].get('source', '')
+                if src and src not in sources:
+                    sources.append(src)
+                if it_dt is not None:
+                    if max_dt is None or it_dt > max_dt:
+                        max_dt = it_dt
+                        best_entry = it
+                        
+            # 更新融后的数据源与货期
+            best_d = dict(best_entry[2])
+            if sources:
+                best_d['source'] = ' + '.join(sources)
+            if max_dt:
+                best_d['delivery'] = max_dt.strftime('%Y-%m-%d')
+                
+            deduped_customer_results.append((best_entry[0], max_dt or best_entry[1], best_d))
+
+    customer_results = deduped_customer_results
+
     # 客服专用参考按 (款号, 到货日期, SKC) 排序
     customer_results.sort(key=lambda x: (x[0][:8], x[2].get('delivery', ''), x[0]))
-    logger.info("客服专用到货参考全量摘录: %d条", len(customer_results))
+    logger.info("客服专用到货参考全量摘录(已跨源去重): %d条", len(customer_results))
 
     # ── 5. 近似颜色匹配（P0 功能） ──────────────────────────────────────
     approxMatches = findApproxColorMatches(neg_skcs, all_restock, skc_has_any)
