@@ -95,6 +95,21 @@ def get_latest_file(directory, pattern='实体库存_黄之俊'):
             return f
     return None  # 不匹配则返回 None，不随意 fallback
 
+def is_yellow_cell(cell):
+    """检查单元格背景填充是否为黄色系（生产部在大货进度表中涂黄表示出清）"""
+    if not cell or not hasattr(cell, 'fill') or not cell.fill or cell.fill.fill_type in [None, 'none']:
+        return False
+    fg = cell.fill.fgColor
+    bg = cell.fill.bgColor
+    rgb = None
+    if fg and fg.rgb: rgb = str(fg.rgb)
+    elif bg and bg.rgb: rgb = str(bg.rgb)
+    if rgb:
+        rgb_u = rgb.upper()
+        if any(y in rgb_u for y in ['FFFF00', 'FFF2CC', 'FFE699', 'FFD966', 'FFFFCC']):
+            return True
+    return False
+
 def parse_spec_new(spec):
     """
     新格式规格编码：货号(8位) + 颜色(2位) + 尺码(2位) = 12位
@@ -1149,8 +1164,9 @@ def analyze():
                 continue
                 
             logger.info("解析 SG 品牌进度表 Sheet: %s", sheet)
-            for row in ws1.iter_rows(min_row=header_num + 1, values_only=True):
-                rd_raw = list(row)
+            for row_cells in ws1.iter_rows(min_row=header_num + 1):
+                rd_raw = [c.value for c in row_cells]
+                row_yellow_clean = any(is_yellow_cell(c) for c in row_cells[:15])
                 if len(rd_raw) <= max(sg_indexes['code'], sg_indexes['color']):
                     continue
                 pc = str(rd_raw[sg_indexes['code']]).strip() if rd_raw[sg_indexes['code']] else ''
@@ -1177,7 +1193,7 @@ def analyze():
                 # 自适应换行拆分
                 sub_rds = split_row_by_newline(rd_raw, sg_indexes)
                 for rd in sub_rds:
-                    # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
+                    # 过滤已出货 (精细化判定：已清完，或黄色背景填充，或已出货量 >= 总下单量)
                     shipped_idx = sg_indexes['shipped']
                     cleared_idx = sg_indexes.get('cleared')
                     total_qty_idx = sg_indexes.get('total_qty')
@@ -1189,6 +1205,10 @@ def analyze():
                         cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
                         if any(x in cleared_val for x in ['清', '是', '已清', '完']):
                             is_shipped_clean = True
+                    
+                    # 2. 生产部视觉打标：单元格黄色背景填充表示出清
+                    if not is_shipped_clean and row_yellow_clean:
+                        is_shipped_clean = True
                     
                     # 2. 备选：必须同时存在总下单量且出货量 >= 总下单量，才判定为结清
                     if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
@@ -1206,11 +1226,11 @@ def analyze():
                             except ValueError:
                                 pass
                                 
+                    color_clean = re.sub(r'\[\d+\]', '', color_raw).strip()
                     # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
                     if not is_shipped_clean:
                         if cc_raw:
                             master_active_skcs.add(pc + cc_raw)
-                        color_clean = re.sub(r'\[\d+\]', '', color_raw).strip()
                         if color_clean:
                             master_active_code_colors.add((pc, color_clean))
                             if cc_raw:
@@ -1319,8 +1339,9 @@ def analyze():
                 continue
                 
             logger.info("解析 NBA 翻单表 Sheet: %s", sheet)
-            for row in ws2.iter_rows(min_row=header_num + 1, values_only=True):
-                rd = list(row)
+            for row_cells in ws2.iter_rows(min_row=header_num + 1):
+                rd = [c.value for c in row_cells]
+                row_yellow_clean_nba = any(is_yellow_cell(c) for c in row_cells[:15])
                 if len(rd) <= max(nba_indexes['code'], nba_indexes['color']):
                     continue
                 pc = str(rd[nba_indexes['code']]).strip() if rd[nba_indexes['code']] else ''
@@ -1343,7 +1364,7 @@ def analyze():
                     
                 master_progress_codes.add(pc)
                     
-                # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
+                # 过滤已出货 (精细化判定：已清完，或黄色背景，或已出货量 >= 总下单量)
                 shipped_idx = nba_indexes['shipped']
                 cleared_idx = nba_indexes.get('cleared')
                 total_qty_idx = nba_indexes.get('total_qty')
@@ -1355,6 +1376,10 @@ def analyze():
                     cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
                     if any(x in cleared_val for x in ['清', '是', '已清', '完']):
                         is_shipped_clean = True
+                
+                # 2. 生产部视觉打标：单元格黄色背景填充表示出清
+                if not is_shipped_clean and row_yellow_clean_nba:
+                    is_shipped_clean = True
                 
                 # 2. 备选：必须同时存在总下单量且出货量 >= 总下单量，才判定为结清
                 if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
@@ -1779,9 +1804,8 @@ def analyze():
             except (ValueError, TypeError):
                 continue
 
-        # 客服专用参考：包含未出清（窗口期内）与已出清（全量保留供查验）的记录
-        is_cleared_entry = d.get('is_cleared', False)
-        if is_cleared_entry or (window_start <= actual_date <= customer_window_end):
+        # 客服专用参考：只要在窗口期内（window_start <= actual_date <= customer_window_end），即便是出清条目也记录到客服专用 Sheet
+        if window_start <= actual_date <= customer_window_end:
             d_cust = dict(d)
             if d.get('is_missing_delivery'):
                 d_cust['delivery'] = '交期未填/待定'
@@ -1791,7 +1815,7 @@ def analyze():
             customer_results.append((skc, actual_date, d_cust))
 
         # 标准窗口期到货（Sheet1 逻辑：排除已出清项，需满足 skc in neg_skcs 且在标准 window_end 内）
-        if is_cleared_entry: continue
+        if d.get('is_cleared', False): continue
         if skc not in neg_skcs: continue
         if window_start <= actual_date <= window_end:
             d2 = dict(d)
