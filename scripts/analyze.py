@@ -828,7 +828,11 @@ def parse_individual_restock_file(filepath):
     解析独立的行格式翻单表（例如 SG26年电商款翻单XXXX.xlsx）。
     表格式为一行一个 SKU（12位规格），包含尺码和颜色列，并使用 Forward Fill 自动向下填充日期。
     """
-    logger.info("解析独立翻单表: %s", os.path.basename(filepath))
+    filename = os.path.basename(filepath)
+    if 'hoodrich' in filename.lower():
+        logger.info("  [硬性过滤] 忽略 HOODRICH 品牌翻单文件: %s", filename)
+        return []
+    logger.info("解析独立翻单表: %s", filename)
     wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
     records = []
     
@@ -1563,6 +1567,9 @@ def analyze():
         for filepath in candidates:
             basename = os.path.basename(filepath)
             if basename.startswith('~$') or basename.startswith('.~'):
+                continue
+            if 'hoodrich' in basename.lower():
+                logger.info("  [硬性过滤] 排除 HOODRICH 品牌翻单文件: %s", basename)
                 continue
             mtime = os.path.getmtime(filepath)
             if datetime.fromtimestamp(mtime) >= limit_time:
