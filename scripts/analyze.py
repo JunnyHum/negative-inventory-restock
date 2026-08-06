@@ -1206,7 +1206,7 @@ def analyze():
                             except ValueError:
                                 pass
                                 
-                    # 关键逻辑：只有在途/未结清的记录，才是大货进度表中有效登记的翻单！
+                    # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
                     if not is_shipped_clean:
                         if cc_raw:
                             master_active_skcs.add(pc + cc_raw)
@@ -1215,8 +1215,6 @@ def analyze():
                             master_active_code_colors.add((pc, color_clean))
                             if cc_raw:
                                 master_active_code_colors.add((pc, cc_raw))
-                    else:
-                        continue
                                 
                     color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
                     mc = re.search(r'\[(\d+)\]', color)
@@ -1284,8 +1282,12 @@ def analyze():
                         all_restock[key]['sizes'][sz] += val
                         
                     status_idx = sg_indexes['status']
-                    if status_idx is not None and len(rd) > status_idx and rd[status_idx]:
-                        all_restock[key]['status'] = str(rd[status_idx])[:30]
+                    orig_status = str(rd[status_idx])[:30] if (status_idx is not None and len(rd) > status_idx and rd[status_idx]) else ''
+                    if is_shipped_clean:
+                        all_restock[key]['status'] = '已出清' if not orig_status else f"已出清({orig_status})"
+                        all_restock[key]['is_cleared'] = True
+                    elif orig_status:
+                        all_restock[key]['status'] = orig_status
                         
                     factory_idx = sg_indexes['factory']
                     if factory_idx is not None and len(rd) > factory_idx and rd[factory_idx]:
@@ -1370,54 +1372,16 @@ def analyze():
                         except ValueError:
                             pass
                             
-                # 关键逻辑：只有在途/未结清的记录，才是大货进度表中有效登记的翻单！
+                color_clean2 = re.sub(r'\[\d+\]', '', color_raw2).strip()
+                # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
                 if not is_shipped_clean:
                     if cc_raw2:
                         master_active_skcs.add(pc + cc_raw2)
-                    color_clean2 = re.sub(r'\[\d+\]', '', color_raw2).strip()
                     if color_clean2:
                         master_active_code_colors.add((pc, color_clean2))
                         if cc_raw2:
                             master_active_code_colors.add((pc, cc_raw2))
-                    
-                # 过滤已出货 (精细化判定：已清完，或已出货量 >= 总下单量)
-                shipped_idx = nba_indexes['shipped']
-                cleared_idx = nba_indexes.get('cleared')
-                total_qty_idx = nba_indexes.get('total_qty')
-                
-                is_shipped_clean = False
-                
-                # 1. 优先通过 "是否清完" 列进行结清打标判定
-                if cleared_idx is not None and len(rd) > cleared_idx:
-                    cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
-                    if any(x in cleared_val for x in ['清', '是', '已清', '完']):
-                        is_shipped_clean = True
-                
-                # 2. 备选：如果出货量大于等于总下单量，也视为结清
-                if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
-                    shipped = rd[shipped_idx]
-                    if shipped is not None and shipped != '':
-                        try:
-                            shipped_val = float(shipped)
-                            if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
-                                try:
-                                    total_qty_val = float(rd[total_qty_idx])
-                                    if total_qty_val > 0 and shipped_val >= total_qty_val:
-                                        is_shipped_clean = True
-                                except ValueError:
-                                    # 如果总下单列的值无法转为数值，则退避到出货量 > 0 即判定
-                                    if shipped_val > 0:
-                                        is_shipped_clean = True
-                            else:
-                                # 兜底：如果没有总下单列，只要总出货 > 0 也判定出货已清
-                                if shipped_val > 0:
-                                    is_shipped_clean = True
-                        except ValueError:
-                            pass
-                
-                if is_shipped_clean:
-                    continue
-                        
+                            
                 color = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
                 mc = re.search(r'\[(\d+)\]', color)
                 cc = mc.group(1) if mc else '?'
@@ -1443,8 +1407,12 @@ def analyze():
                         all_restock[key]['sizes'][sz] += val if isinstance(val, (int, float)) else 0
                         
                 status_idx = nba_indexes['status']
-                if status_idx is not None and len(rd) > status_idx and rd[status_idx]:
-                    all_restock[key]['status'] = str(rd[status_idx])[:30]
+                orig_status_nba = str(rd[status_idx])[:30] if (status_idx is not None and len(rd) > status_idx and rd[status_idx]) else ''
+                if is_shipped_clean:
+                    all_restock[key]['status'] = '已出清' if not orig_status_nba else f"已出清({orig_status_nba})"
+                    all_restock[key]['is_cleared'] = True
+                elif orig_status_nba:
+                    all_restock[key]['status'] = orig_status_nba
                     
                 factory_idx = nba_indexes['factory']
                 if factory_idx is not None and len(rd) > factory_idx and rd[factory_idx]:
@@ -1811,8 +1779,9 @@ def analyze():
             except (ValueError, TypeError):
                 continue
 
-        # 客服专用参考：不限定 skc in neg_skcs，窗口期覆盖到往后 20 天（today+20天）
-        if window_start <= actual_date <= customer_window_end:
+        # 客服专用参考：包含未出清（窗口期内）与已出清（全量保留供查验）的记录
+        is_cleared_entry = d.get('is_cleared', False)
+        if is_cleared_entry or (window_start <= actual_date <= customer_window_end):
             d_cust = dict(d)
             if d.get('is_missing_delivery'):
                 d_cust['delivery'] = '交期未填/待定'
@@ -1821,7 +1790,8 @@ def analyze():
             d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             customer_results.append((skc, actual_date, d_cust))
 
-        # 标准窗口期到货（原 Sheet1 逻辑：需满足 skc in neg_skcs 且在标准 window_end 内）
+        # 标准窗口期到货（Sheet1 逻辑：排除已出清项，需满足 skc in neg_skcs 且在标准 window_end 内）
+        if is_cleared_entry: continue
         if skc not in neg_skcs: continue
         if window_start <= actual_date <= window_end:
             d2 = dict(d)
