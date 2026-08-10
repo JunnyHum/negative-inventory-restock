@@ -55,6 +55,9 @@ logger = logging.getLogger(__name__)
 SIZE_KEYS = ['XS', 'S', 'M', 'L', 'XL', '2XL', '均码']
 SIZE_LAST_MAP = {'4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL', '0': '均码'}
 
+# 本店铺未上架商品黑名单/排除款号（用户指定不纳入分析记录的非本店铺销售款式）
+EXCLUDED_UNOFFICIAL_CODES = {'WD920217'}
+
 def toInt(v) -> int:
     """将单元格值安全转换为整数"""
     if v is None or v == '' or v == '-':
@@ -915,7 +918,7 @@ def parse_individual_restock_file(filepath):
                 continue
                 
             pc = str(rd[indexes['code']]).strip() if rd[indexes['code']] else ''
-            if not pc or pc == 'None':
+            if not pc or pc == 'None' or pc in EXCLUDED_UNOFFICIAL_CODES:
                 continue
                 
             color = str(rd[indexes['color']]) if rd[indexes['color']] else ''
@@ -1078,6 +1081,8 @@ def analyze():
     neg_skcs = {}
     for skc, qty in wh_neg_total.items():
         code    = skc[:8]
+        if code in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
+            continue
         is_junma = product_is_junma.get(code, False)
         sizes   = wh_neg_size.get(skc, {})
         if is_junma:
@@ -1174,7 +1179,7 @@ def analyze():
                 if len(rd_raw) <= max(sg_indexes['code'], sg_indexes['color']):
                     continue
                 pc = str(rd_raw[sg_indexes['code']]).strip() if rd_raw[sg_indexes['code']] else ''
-                if not pc:
+                if not pc or pc in EXCLUDED_UNOFFICIAL_CODES:
                     continue
                 # 颜色编号提取双源兼容：
                 # 来源1: 颜色字段 [XX] 正则
@@ -1349,7 +1354,7 @@ def analyze():
                 if len(rd) <= max(nba_indexes['code'], nba_indexes['color']):
                     continue
                 pc = str(rd[nba_indexes['code']]).strip() if rd[nba_indexes['code']] else ''
-                if not pc:
+                if not pc or pc in EXCLUDED_UNOFFICIAL_CODES:
                     continue
                 # 颜色编号提取双源兼容：
                 # 来源1: 颜色字段 [XX] 正则
@@ -1692,6 +1697,8 @@ def analyze():
     if prev_wh_file:
         for skc, cur_total in wh_neg_total.items():
             code = skc[:8]
+            if code in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
+                continue
             is_junma = product_is_junma.get(code, False)
             
             # 判断昨日与今日是否实际有库存（独享仓最高优先级）
