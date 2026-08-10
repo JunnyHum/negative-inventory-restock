@@ -1828,9 +1828,11 @@ def analyze():
             d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             customer_results.append((skc, actual_date, d_cust))
 
-        # 标准窗口期到货（Sheet1 逻辑：排除已出清项，需满足 skc in neg_skcs 且在标准 window_end 内）
+        # 标准窗口期到货（Sheet1 逻辑：排除已出清项，需在网红店商品表中登记，且在标准 window_end 内）
         if d.get('is_cleared', False): continue
         if skc not in neg_skcs: continue
+        pc_code = skc[:8]
+        if pc_code not in product_table: continue
         if window_start <= actual_date <= window_end:
             d2 = dict(d)
             if d.get('is_missing_delivery'):
