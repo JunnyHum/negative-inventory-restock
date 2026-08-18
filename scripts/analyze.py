@@ -17,7 +17,7 @@ import os
 import glob
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import datetime as dt
 
 CONFIG_PATH = Path(__file__).parent.parent / 'config.json'
