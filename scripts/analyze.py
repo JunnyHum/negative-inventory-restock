@@ -1955,7 +1955,7 @@ def analyze():
     biz_data = load_business_data(biz_dir_resolved, pats['biz_advisor'])
     scores   = score_and_advise(unmatched, biz_data)
 
-    # ── 8. 归集全链路疑似错误与核对项（供商品部/生产部核对专属纠错 Sheet 使用）──────
+    # ── 8. 归集全链路疑似错误与待核对项（供专属纠错 Sheet 使用）──────
     audit_errors = []
     seen_audit_keys = set()
     
@@ -1980,7 +1980,7 @@ def analyze():
                     'raw_delivery': raw_del.strftime('%Y-%m-%d'),
                     'qty': info.get('qty', 0),
                     'owner_factory': f"{info.get('status', '')} / {info.get('factory', '')}",
-                    'suggestion': f"翻单表中填写的交期为 {raw_del.strftime('%Y-%m-%d')}（早于当前日期），疑似复制旧模板未更新交期，请向商品部核对最新预计到仓日"
+                    'suggestion': f"翻单表中填写的交期为 {raw_del.strftime('%Y-%m-%d')}（早于当前日期），疑似复制旧模板未更新交期，请核对最新预计到仓日"
                 })
         # 原始交期未填/待定
         elif raw_del is None or info.get('is_missing_delivery'):
@@ -1996,7 +1996,7 @@ def analyze():
                     'raw_delivery': '空白/未填',
                     'qty': info.get('qty', 0),
                     'owner_factory': f"{info.get('status', '')} / {info.get('factory', '')}",
-                    'suggestion': "翻单表中有下单数量但未填写到货日期，请商品部/生产部补充明确交期"
+                    'suggestion': "翻单表中有下单数量但未填写到货日期，请核实并补充明确交期"
                 })
                 
     # 2. 微信有翻单但大货总进度表遗漏未登记 (来自 omitted_details)
@@ -2014,7 +2014,7 @@ def analyze():
                 'raw_delivery': deliv_str,
                 'qty': item['qty'],
                 'owner_factory': f"{item.get('owner', '')} / {item.get('factory', '')}",
-                'suggestion': "微信群中有下单记录，但生产大货总表中未见此批翻单，需生产部核实补登"
+                'suggestion': "微信群中有下单记录，但生产大货总表中未见此批翻单，需核实补登"
             })
             
     # 3. 翻单款但在店铺主商品表《SG网红店商品表.xlsx》中查无此款 (未建档)
@@ -2035,7 +2035,7 @@ def analyze():
                     'raw_delivery': act_dt.strftime('%Y-%m-%d') if isinstance(act_dt, datetime) else str(act_dt),
                     'qty': sum(d['sizes'].values()),
                     'owner_factory': f"{d.get('status', '')} / {d.get('factory', '')}",
-                    'suggestion': "已有翻单安排，但《SG网红店商品表.xlsx》中尚未建档录入该款，需商品部核对是否为专供款或补录"
+                    'suggestion': "已有翻单安排，但店铺主商品表中尚未建档录入该款，需核对是否为专供款或补录"
                 })
                 
     # 4. 仓库已扫码入库但商品表未录入 (来自 Sheet2 中的异常款)
@@ -2055,10 +2055,10 @@ def analyze():
                     'raw_delivery': '已在仓',
                     'qty': d2.get('cur_total', 0),
                     'owner_factory': '仓库实物库存',
-                    'suggestion': "仓库已扫码入库产生实际可销库存，但商品表未登记该款，需商品部尽快建档上架并开启同步"
+                    'suggestion': "仓库已扫码入库产生实际可销库存，但商品表未登记该款，需尽快建档上架并开启同步"
                 })
 
-    logger.info("疑似错误/商品部核对项归集: %d条", len(audit_errors))
+    logger.info("疑似错误待核对项归集: %d条", len(audit_errors))
 
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
            paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
@@ -2372,11 +2372,11 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
     ], title="🎨 客服查货与预售指引告示区")
 
-    # ── Sheet5: 疑似错误_商品部核对 ─────────────────────────────────────
+    # ── Sheet5: 疑似错误_待核对 ─────────────────────────────────────
     if audit_errors is None:
         audit_errors = []
         
-    ws5 = wb.create_sheet('疑似错误_商品部核对')
+    ws5 = wb.create_sheet('疑似错误_待核对')
     headers5 = ['款号', 'SKC', '颜色', '疑似异常类型', '涉及数据源文件', '表格原填交期', '涉及数量', '负责人/工厂', '疑问说明与核对建议']
     ws5.append(headers5)
     for ci, h in enumerate(headers5, 1):
