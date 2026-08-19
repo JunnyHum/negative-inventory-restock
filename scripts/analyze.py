@@ -972,6 +972,8 @@ def parse_individual_restock_file(filepath):
             else:
                 last_delivery = delivery_date
 
+            raw_deliv_orig = delivery_date
+
             # 业务指定/人工交期校准覆盖 (处理散表中遗留的历史旧交期或业务调整)
             if pc in MANUAL_DELIVERY_OVERRIDES:
                 delivery_date = MANUAL_DELIVERY_OVERRIDES[pc]
@@ -1000,6 +1002,7 @@ def parse_individual_restock_file(filepath):
                     'size': size_name,
                     'qty': qty_val,
                     'delivery': delivery_date,
+                    'raw_delivery': raw_deliv_orig,
                     'factory': factory,
                     'status': status
                 })
@@ -1639,6 +1642,7 @@ def analyze():
                         'status': str(r['status'])[:30] if r['status'] else '',
                         'factory': str(r['factory']) if r['factory'] else '',
                         'is_missing_delivery': is_missing_delivery,
+                        'raw_delivery': r.get('raw_delivery'),
                         'source': basename
                     }
                     
@@ -1951,14 +1955,119 @@ def analyze():
     biz_data = load_business_data(biz_dir_resolved, pats['biz_advisor'])
     scores   = score_and_advise(unmatched, biz_data)
 
+    # ── 8. 归集全链路疑似错误与核对项（供商品部/生产部核对专属纠错 Sheet 使用）──────
+    audit_errors = []
+    seen_audit_keys = set()
+    
+    # 1. 历史旧交期 / 疑似遗漏交期修改（如 8月发起的翻单填成了 3月）
+    for (gk_k, skc_k, sz_k, del_k), info in gk_sku_restock.items():
+        pc = skc_k[:8]
+        if pc in EXCLUDED_UNOFFICIAL_CODES or skc_k in EXCLUDED_UNOFFICIAL_CODES:
+            continue
+        raw_del = info.get('raw_delivery')
+        # 如果填写的原始交期早于今天 20 天以上
+        if raw_del and isinstance(raw_del, datetime) and raw_del < today - timedelta(days=20):
+            audit_key = (skc_k, 'HISTORICAL_DELIVERY', raw_del.strftime('%Y-%m-%d'))
+            if audit_key not in seen_audit_keys:
+                seen_audit_keys.add(audit_key)
+                src = info.get('source', '')
+                audit_errors.append({
+                    'code': pc,
+                    'skc': skc_k,
+                    'color': wh_colors_txt.get(skc_k, ''),
+                    'type': '⚠️ 历史旧交期(疑似遗漏修改)',
+                    'source': src,
+                    'raw_delivery': raw_del.strftime('%Y-%m-%d'),
+                    'qty': info.get('qty', 0),
+                    'owner_factory': f"{info.get('status', '')} / {info.get('factory', '')}",
+                    'suggestion': f"翻单表中填写的交期为 {raw_del.strftime('%Y-%m-%d')}（早于当前日期），疑似复制旧模板未更新交期，请向商品部核对最新预计到仓日"
+                })
+        # 原始交期未填/待定
+        elif raw_del is None or info.get('is_missing_delivery'):
+            audit_key = (skc_k, 'MISSING_DELIVERY')
+            if audit_key not in seen_audit_keys:
+                seen_audit_keys.add(audit_key)
+                audit_errors.append({
+                    'code': pc,
+                    'skc': skc_k,
+                    'color': wh_colors_txt.get(skc_k, ''),
+                    'type': '❓ 交期未填/待定',
+                    'source': info.get('source', ''),
+                    'raw_delivery': '空白/未填',
+                    'qty': info.get('qty', 0),
+                    'owner_factory': f"{info.get('status', '')} / {info.get('factory', '')}",
+                    'suggestion': "翻单表中有下单数量但未填写到货日期，请商品部/生产部补充明确交期"
+                })
+                
+    # 2. 微信有翻单但大货总进度表遗漏未登记 (来自 omitted_details)
+    for item in omitted_details:
+        audit_key = (item['skc'], 'OMITTED_FROM_MASTER')
+        if audit_key not in seen_audit_keys:
+            seen_audit_keys.add(audit_key)
+            deliv_str = item['delivery'].strftime('%Y-%m-%d') if isinstance(item['delivery'], datetime) else str(item['delivery'])
+            audit_errors.append({
+                'code': item['code'],
+                'skc': item['skc'],
+                'color': item['color'],
+                'type': '⚠️ 大货总表未登记',
+                'source': item.get('source', ''),
+                'raw_delivery': deliv_str,
+                'qty': item['qty'],
+                'owner_factory': f"{item.get('owner', '')} / {item.get('factory', '')}",
+                'suggestion': "微信群中有下单记录，但生产大货总表中未见此批翻单，需生产部核实补登"
+            })
+            
+    # 3. 翻单款但在店铺主商品表《SG网红店商品表.xlsx》中查无此款 (未建档)
+    for (skc, act_dt), d in all_restock.items():
+        pc = skc[:8]
+        if pc in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
+            continue
+        if pc not in product_table:
+            audit_key = (pc, 'NOT_IN_PRODUCT_TABLE')
+            if audit_key not in seen_audit_keys:
+                seen_audit_keys.add(audit_key)
+                audit_errors.append({
+                    'code': pc,
+                    'skc': skc,
+                    'color': wh_colors_txt.get(skc, d.get('color', '')),
+                    'type': '⚠️ 商品表未录入(未登记款)',
+                    'source': d.get('source', ''),
+                    'raw_delivery': act_dt.strftime('%Y-%m-%d') if isinstance(act_dt, datetime) else str(act_dt),
+                    'qty': sum(d['sizes'].values()),
+                    'owner_factory': f"{d.get('status', '')} / {d.get('factory', '')}",
+                    'suggestion': "已有翻单安排，但《SG网红店商品表.xlsx》中尚未建档录入该款，需商品部核对是否为专供款或补录"
+                })
+                
+    # 4. 仓库已扫码入库但商品表未录入 (来自 Sheet2 中的异常款)
+    for d2 in sheet2_data:
+        if '异常新品到仓' in d2.get('备注', ''):
+            skc = d2['skc']
+            pc = skc[:8]
+            audit_key = (skc, 'WH_STOCK_NOT_IN_PRODUCT_TABLE')
+            if audit_key not in seen_audit_keys:
+                seen_audit_keys.add(audit_key)
+                audit_errors.append({
+                    'code': pc,
+                    'skc': skc,
+                    'color': d2.get('color', ''),
+                    'type': '❓ 仓库有货但商品表未录',
+                    'source': '系统库存导出(实际入库)',
+                    'raw_delivery': '已在仓',
+                    'qty': d2.get('cur_total', 0),
+                    'owner_factory': '仓库实物库存',
+                    'suggestion': "仓库已扫码入库产生实际可销库存，但商品表未登记该款，需商品部尽快建档上架并开启同步"
+                })
+
+    logger.info("疑似错误/商品部核对项归集: %d条", len(audit_errors))
+
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
            paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
-           customer_results, wh_neg_total
+           customer_results, wh_neg_total, audit_errors
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
              output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None, omitted_details=None,
-             customer_results=None, wh_neg_total=None):
+             customer_results=None, wh_neg_total=None, audit_errors=None):
     from datetime import datetime
     import re
     
@@ -2304,6 +2413,63 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
     ], title="🎨 客服查货与预售指引告示区")
 
+    # ── Sheet6: 疑似错误_商品部核对 ─────────────────────────────────────
+    if audit_errors is None:
+        audit_errors = []
+        
+    ws6 = wb.create_sheet('疑似错误_商品部核对')
+    headers6 = ['款号', 'SKC', '颜色', '疑似异常类型', '涉及数据源文件', '表格原填交期', '涉及数量', '负责人/工厂', '疑问说明与核对建议']
+    ws6.append(headers6)
+    for ci, h in enumerate(headers6, 1):
+        cell = ws6.cell(1, ci)
+        cell.fill = hf; cell.font = hfont
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = tb
+
+    color_audit_map = {
+        '⚠️ 历史旧交期(疑似遗漏修改)': 'FFF2CC', # 暖黄预警
+        '⚠️ 大货总表未登记': 'F4CCCC',        # 浅红警告
+        '⚠️ 商品表未录入(未登记款)': 'E2EFDA', # 浅青色
+        '❓ 仓库有货但商品表未录': 'FCE4D6',   # 浅粉红
+        '❓ 交期未填/待定': 'FFF2CC'           # 暖黄预警
+    }
+
+    for item in audit_errors:
+        err_type = item.get('type', '')
+        fill_color = color_audit_map.get(err_type, 'FFF2CC')
+        row = [
+            item.get('code', ''),
+            item.get('skc', ''),
+            item.get('color', ''),
+            err_type,
+            item.get('source', ''),
+            item.get('raw_delivery', ''),
+            round(item.get('qty', 0), 0),
+            item.get('owner_factory', ''),
+            item.get('suggestion', '')
+        ]
+        ws6.append(row)
+        rn = ws6.max_row
+        for ci in range(1, len(headers6) + 1):
+            cell = ws6.cell(rn, ci)
+            cell.border = tb
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
+
+    cw6 = [10, 14, 10, 24, 26, 14, 10, 16, 46]
+    for ci, w in enumerate(cw6, 1):
+        ws6.column_dimensions[get_column_letter(ci)].width = w
+    ws6.freeze_panes = 'A2'
+    ws6.auto_filter.ref = f"A1:{get_column_letter(ws6.max_column)}{ws6.max_row}"
+
+    # 绘制 Sheet6 右侧专属告示区
+    draw_legend_box(ws6, 11, [
+        ('FFF2CC', '🟡 ⚠️ 历史旧交期', '翻单表填写的交期早于当前日期，疑似复制旧模板未更新交期'),
+        ('F4CCCC', '🔴 ⚠️ 大货表遗漏', '微信群中已有下单记录，但生产大货总表中未见此批翻单'),
+        ('E2EFDA', '🟢 ⚠️ 商品表未录', '已有翻单安排，但《SG网红店商品表.xlsx》中尚未建档录入该款'),
+        ('FCE4D6', '🌸 ❓ 仓库有货未录', '仓库已扫码入库产生实际可销库存，但商品表未登记该款')
+    ], title="🎨 数据核对与纠错告示区")
+
     wb.save(out_path)
     logger.info("已保存: %s", out_path)
     return out_path
@@ -2316,7 +2482,7 @@ if __name__ == '__main__':
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
         output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
-        customer_results, wh_neg_total = analyze()
+        customer_results, wh_neg_total, audit_errors = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
@@ -2325,12 +2491,14 @@ if __name__ == '__main__':
             omitted_details = [o for o in omitted_details if args.skc in o['skc']]
         if customer_results:
             customer_results = [c for c in customer_results if args.skc in c[0]]
+        if audit_errors:
+            audit_errors = [a for a in audit_errors if args.skc in a['skc'] or args.skc in a['code']]
 
     if results or unmatched or customer_results:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
                         scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details,
-                        customer_results, wh_neg_total)
-        logger.info("完成: 窗口期到货%d条 | 客服参考%d条 | 库存回补%d条 | 无翻单%d条",
-                    len(results), len(customer_results), len(sheet2_data), len(unmatched))
+                        customer_results, wh_neg_total, audit_errors)
+        logger.info("完成: 窗口期到货%d条 | 客服参考%d条 | 库存回补%d条 | 疑似错误核对%d条 | 无翻单%d条",
+                    len(results), len(customer_results), len(sheet2_data), len(audit_errors), len(unmatched))
     else:
         logger.info("无数据")
