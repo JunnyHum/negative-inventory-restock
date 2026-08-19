@@ -2313,61 +2313,20 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws3.freeze_panes = 'A2'
     ws3.auto_filter.ref = f"A1:{get_column_letter(ws3.max_column)}{ws3.max_row}"
 
-    # ── Sheet4: 大货表遗漏预警 ─────────────────────────────────────────
-    if omitted_details is None:
-        omitted_details = []
-        
-    ws4 = wb.create_sheet('大货表遗漏预警')
-    headers4 = ['款号', 'SKC', '颜色', '到货日期', '微信下单数', '负责人', '生产工厂', '微信来源文件', '处理建议']
-    ws4.append(headers4)
-    for ci, h in enumerate(headers4, 1):
-        cell = ws4.cell(1, ci)
-        cell.fill = hf; cell.font = hfont
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-        cell.border = tb
-
-    # 填充淡红色突出警告
-    fill_color = 'F4CCCC'
-    for item in omitted_details:
-        deliv_str = item['delivery'].strftime('%Y-%m-%d') if isinstance(item['delivery'], datetime) else str(item['delivery'])
-        row = [
-            item['code'], item['skc'], item['color'], deliv_str,
-            round(item['qty'], 0), item['owner'], item['factory'], item['source'],
-            '⚠️ 大货总进度表中遗漏该款翻单，请补登此款'
-        ]
-        ws4.append(row)
-        rn = ws4.max_row
-        for ci in range(1, len(headers4) + 1):
-            cell = ws4.cell(rn, ci)
-            cell.border = tb
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-            cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
-
-    cw4 = [10, 14, 10, 12, 10, 10, 10, 24, 28]
-    for ci, w in enumerate(cw4, 1):
-        ws4.column_dimensions[get_column_letter(ci)].width = w
-    ws4.freeze_panes = 'A2'
-    ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
-
-    # 绘制 Sheet4 右侧告示区
-    draw_legend_box(ws4, 11, [
-        ('F4CCCC', '🔴 ⚠️ 翻单遗漏警告', '微信群中有下单记录，但生产大货总进度表中漏登，需负责人补登')
-    ], title="🎨 大货表审计告示区")
-
-    # ── Sheet5: 客服专用_到货参考 ───────────────────────────────────────
+    # ── Sheet4: 客服专用_到货参考 ───────────────────────────────────────
     if customer_results is None:
         customer_results = []
     if wh_neg_total is None:
         wh_neg_total = {}
 
-    ws5 = wb.create_sheet('客服专用_到货参考')
-    headers5 = ['款号', 'SKC编码', '颜色', '仓库可销',
+    ws4 = wb.create_sheet('客服专用_到货参考')
+    headers4 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次到货数量', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '预计到货日期', '生产状态', '工厂', '翻单数据源']
-    ws5.append(headers5)
-    for ci, h in enumerate(headers5, 1):
-        cell = ws5.cell(1, ci)
+    ws4.append(headers4)
+    for ci, h in enumerate(headers4, 1):
+        cell = ws4.cell(1, ci)
         cell.fill = hf; cell.font = hfont
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
@@ -2390,38 +2349,38 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
             d.get('delivery', ''), d.get('status', ''), d.get('factory', ''), d.get('source', '')
         ]
-        ws5.append(row)
-        rn = ws5.max_row
+        ws4.append(row)
+        rn = ws4.max_row
         
         fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
-        for ci in range(1, len(headers5) + 1):
-            cell = ws5.cell(rn, ci)
+        for ci in range(1, len(headers4) + 1):
+            cell = ws4.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw5 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
-    for ci, w in enumerate(cw5, 1):
-        ws5.column_dimensions[get_column_letter(ci)].width = w
-    ws5.freeze_panes = 'A2'
-    ws5.auto_filter.ref = f"A1:{get_column_letter(ws5.max_column)}{ws5.max_row}"
+    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
+    for ci, w in enumerate(cw4, 1):
+        ws4.column_dimensions[get_column_letter(ci)].width = w
+    ws4.freeze_panes = 'A2'
+    ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
-    # 绘制 Sheet5 右侧客服专属告示区
-    draw_legend_box(ws5, 23, [
+    # 绘制 Sheet4 右侧客服专属告示区
+    draw_legend_box(ws4, 23, [
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
     ], title="🎨 客服查货与预售指引告示区")
 
-    # ── Sheet6: 疑似错误_商品部核对 ─────────────────────────────────────
+    # ── Sheet5: 疑似错误_商品部核对 ─────────────────────────────────────
     if audit_errors is None:
         audit_errors = []
         
-    ws6 = wb.create_sheet('疑似错误_商品部核对')
-    headers6 = ['款号', 'SKC', '颜色', '疑似异常类型', '涉及数据源文件', '表格原填交期', '涉及数量', '负责人/工厂', '疑问说明与核对建议']
-    ws6.append(headers6)
-    for ci, h in enumerate(headers6, 1):
-        cell = ws6.cell(1, ci)
+    ws5 = wb.create_sheet('疑似错误_商品部核对')
+    headers5 = ['款号', 'SKC', '颜色', '疑似异常类型', '涉及数据源文件', '表格原填交期', '涉及数量', '负责人/工厂', '疑问说明与核对建议']
+    ws5.append(headers5)
+    for ci, h in enumerate(headers5, 1):
+        cell = ws5.cell(1, ci)
         cell.fill = hf; cell.font = hfont
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
@@ -2448,22 +2407,22 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             item.get('owner_factory', ''),
             item.get('suggestion', '')
         ]
-        ws6.append(row)
-        rn = ws6.max_row
-        for ci in range(1, len(headers6) + 1):
-            cell = ws6.cell(rn, ci)
+        ws5.append(row)
+        rn = ws5.max_row
+        for ci in range(1, len(headers5) + 1):
+            cell = ws5.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw6 = [10, 14, 10, 24, 26, 14, 10, 16, 46]
-    for ci, w in enumerate(cw6, 1):
-        ws6.column_dimensions[get_column_letter(ci)].width = w
-    ws6.freeze_panes = 'A2'
-    ws6.auto_filter.ref = f"A1:{get_column_letter(ws6.max_column)}{ws6.max_row}"
+    cw5 = [10, 14, 10, 24, 26, 14, 10, 16, 46]
+    for ci, w in enumerate(cw5, 1):
+        ws5.column_dimensions[get_column_letter(ci)].width = w
+    ws5.freeze_panes = 'A2'
+    ws5.auto_filter.ref = f"A1:{get_column_letter(ws5.max_column)}{ws5.max_row}"
 
-    # 绘制 Sheet6 右侧专属告示区
-    draw_legend_box(ws6, 11, [
+    # 绘制 Sheet5 右侧专属告示区
+    draw_legend_box(ws5, 11, [
         ('FFF2CC', '🟡 ⚠️ 历史旧交期', '翻单表填写的交期早于当前日期，疑似复制旧模板未更新交期'),
         ('F4CCCC', '🔴 ⚠️ 大货表遗漏', '微信群中已有下单记录，但生产大货总表中未见此批翻单'),
         ('E2EFDA', '🟢 ⚠️ 商品表未录', '已有翻单安排，但《SG网红店商品表.xlsx》中尚未建档录入该款'),
