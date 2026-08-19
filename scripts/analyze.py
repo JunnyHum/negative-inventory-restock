@@ -58,6 +58,11 @@ SIZE_LAST_MAP = {'4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL', '0': '均�
 # 本店铺未上架商品黑名单/排除款号（用户指定不纳入分析记录的非本店铺销售款式）
 EXCLUDED_UNOFFICIAL_CODES = {'WD920217'}
 
+# 人工指定的款式到货交期校准字典（针对散表中遗留历史日期或业务最新改期调整）
+MANUAL_DELIVERY_OVERRIDES = {
+    'WE133321': datetime(2026, 9, 2),
+}
+
 def toInt(v) -> int:
     """将单元格值安全转换为整数"""
     if v is None or v == '' or v == '-':
@@ -965,6 +970,11 @@ def parse_individual_restock_file(filepath):
             if delivery_date is None:
                 delivery_date = last_delivery
             else:
+                last_delivery = delivery_date
+
+            # 业务指定/人工交期校准覆盖 (处理散表中遗留的历史旧交期或业务调整)
+            if pc in MANUAL_DELIVERY_OVERRIDES:
+                delivery_date = MANUAL_DELIVERY_OVERRIDES[pc]
                 last_delivery = delivery_date
                 
             if not factory:
