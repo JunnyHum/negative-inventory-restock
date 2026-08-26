@@ -1863,50 +1863,87 @@ def analyze():
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
 
-    # ── 客服专用参考全局跨源尺码签名去重 ──
-    # 彻底解决同一 SKC 各尺码配码完全一致、由于跨表来源（微信散表 vs 大货总表）到货日期相差几开而产生的重复行陈列
-    cust_groups = defaultdict(list)
-    for skc_item, act_dt, d_item in customer_results:
-        # 提取各尺码数量 tuple 签名
-        sz_tuple = tuple(round(d_item['sizes'].get(k, 0), 0) for k in SIZE_KEYS)
-        cust_groups[(skc_item, sz_tuple)].append((skc_item, act_dt, d_item))
+    # ── 通用跨源尺码签名去重与交期智能融合引擎 ───────────────────────
+    def dedup_and_merge_entries(entry_list, is_customer_sheet=False):
+        """
+        全局跨源尺码签名去重与交期融合引擎
+        同一 SKC 下各尺码数量完全一致（sz_signature 相同）视为同一笔翻单：
+        1. 交期裁决：剔除'交期未填/待定'，优先选取有具体交期的版本；若有多个具体交期，以最新校准（最晚有效交期）为准。
+        2. 生产状态融合：优先保留包含具体生产进度描述（如'在绣花'、'没面料'、'正在印花中'等）的状态。
+        3. 工厂融合：优先选取有效非空工厂名（排除 #N/A 和空）。
+        4. 数据源融合：若为客服表，合并多源文件名（如 微信散表 + 大货表）。
+        """
+        groups = defaultdict(list)
+        for skc, act_dt, d in entry_list:
+            sz_tuple = tuple(round(float(d.get('sizes', {}).get(k, 0) or 0), 0) for k in SIZE_KEYS)
+            groups[(skc, sz_tuple)].append((skc, act_dt, d))
 
-    deduped_customer_results = []
-    for (skc_item, sz_tuple), item_list in cust_groups.items():
-        if len(item_list) == 1:
-            deduped_customer_results.append(item_list[0])
-        else:
-            # 存在多条各尺码数量完全一致的重合条目：
-            # 1. 优先选择到货日期明确且最晚的那一条作为代表（即最新调整校准后的货期）
-            # 2. 融合显示数据源（如 微信0724唐 + 大货表），避免客服混淆
-            best_entry = item_list[0]
-            max_dt = None
-            sources = []
-            
+        deduped = []
+        for (skc, sz_tuple), item_list in groups.items():
+            if len(item_list) == 1:
+                deduped.append(item_list[0])
+                continue
+
+            # 存在重复项，执行智能裁决与融合
+            # 1. 优先提取明确具体交期（过滤未填/待定/None）
+            valid_items = []
             for it in item_list:
                 it_dt = it[1]
-                src = it[2].get('source', '')
-                if src and src not in sources:
-                    sources.append(src)
-                if it_dt is not None:
-                    if max_dt is None or it_dt > max_dt:
-                        max_dt = it_dt
-                        best_entry = it
-                        
-            # 更新融后的数据源与货期
-            best_d = dict(best_entry[2])
-            if sources:
-                best_d['source'] = ' + '.join(sources)
-            if max_dt:
-                best_d['delivery'] = max_dt.strftime('%Y-%m-%d')
-                
-            deduped_customer_results.append((best_entry[0], max_dt or best_entry[1], best_d))
+                it_deliv_str = str(it[2].get('delivery', ''))
+                if it_dt is not None and '待定' not in it_deliv_str and '未填' not in it_deliv_str and it_deliv_str != 'None':
+                    valid_items.append((it_dt, it))
 
-    customer_results = deduped_customer_results
+            if valid_items:
+                # 按具体交期取最晚（即最新校准的货期）的记录作为主模板
+                valid_items.sort(key=lambda x: x[0])
+                best_dt, best_entry = valid_items[-1]
+                final_dt = best_dt
+                final_delivery_str = best_dt.strftime('%Y-%m-%d')
+            else:
+                best_entry = item_list[0]
+                final_dt = best_entry[1]
+                final_delivery_str = '交期未填/待定'
+
+            # 2. 生产状态融合：优先保留包含具体生产进度的描述
+            statuses = [it[2].get('status', '') for it in item_list if it[2].get('status') and str(it[2].get('status')) != 'None']
+            detailed_status = ''
+            for st in statuses:
+                if any(kw in str(st) for kw in ['中', '在', '料', '定做', '订做', '改', '裁', '开板', '已出清', '缺失', '到仓']):
+                    detailed_status = str(st)
+                    break
+            if not detailed_status and statuses:
+                detailed_status = str(statuses[-1])
+
+            # 3. 工厂融合：优先选取有效工厂名称（排除 #N/A、None、- 等无效占位）
+            factories = [it[2].get('factory', '') for it in item_list if it[2].get('factory') and str(it[2].get('factory')).strip() not in ['#N/A', 'None', '', '-', 'None']]
+            final_factory = str(factories[-1]) if factories else str(best_entry[2].get('factory') or '')
+
+            merged_d = dict(best_entry[2])
+            merged_d['delivery'] = final_delivery_str
+            merged_d['status'] = detailed_status
+            merged_d['factory'] = final_factory
+
+            # 4. 数据源融合（主要用于客服专用表）
+            if is_customer_sheet:
+                sources = []
+                for it in item_list:
+                    src = it[2].get('source', '')
+                    if src and src not in sources:
+                        sources.append(src)
+                if sources:
+                    merged_d['source'] = ' + '.join(sources)
+
+            deduped.append((skc, final_dt, merged_d))
+
+        return deduped
+
+    # ── 对 Sheet 1 (窗口期到货) 与 Sheet 4 (客服专用参考) 执行去重融合 ──
+    results = dedup_and_merge_entries(results, is_customer_sheet=False)
+    customer_results = dedup_and_merge_entries(customer_results, is_customer_sheet=True)
 
     # 客服专用参考按 (款号, 到货日期, SKC) 排序
     customer_results.sort(key=lambda x: (x[0][:8], x[2].get('delivery', ''), x[0]))
-    logger.info("客服专用到货参考全量摘录(已跨源去重): %d条", len(customer_results))
+    logger.info("客服专用到货参考全量摘录(已跨源去重融合): %d条", len(customer_results))
 
     # ── 5. 近似颜色匹配（P0 功能） ──────────────────────────────────────
     approxMatches = findApproxColorMatches(neg_skcs, all_restock, skc_has_any)
