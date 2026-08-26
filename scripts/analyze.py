@@ -1079,6 +1079,24 @@ def analyze():
     window_end   = today + timedelta(days=15)
     logger.info("窗口期: %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
 
+    def is_older_than_last_week(source_name, base_date=today):
+        """
+        判断该翻单表是否来源于上周或更早（>7天前发起）
+        """
+        if not source_name:
+            return False
+        bname = os.path.basename(str(source_name))
+        m = re.search(r'(\d{2})(\d{2})', bname)
+        if m:
+            try:
+                mm, dd = int(m.group(1)), int(m.group(2))
+                if 1 <= mm <= 12 and 1 <= dd <= 31:
+                    f_dt = datetime(base_date.year, mm, dd)
+                    return f_dt < (base_date - timedelta(days=7))
+            except Exception:
+                pass
+        return False
+
     # ── 1. 加载当前仓库 ──────────────────────────────────────────────
     wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes = load_warehouse(wh_file)
 
@@ -1855,10 +1873,15 @@ def analyze():
                 d2['delivery'] = actual_date.strftime('%Y-%m-%d')
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             
-            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记
+            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记：
+            # 区分「上周及更早散表在当周总表无记录(疑似未实际下单)」与「本周新翻单(大货表待登)」
             if skc not in master_progress_skcs:
                 owner = d.get('status') or ''
-                d2['status'] = f"⚠️大货表缺失({owner})"
+                src = d.get('source') or ''
+                if is_older_than_last_week(src, base_date=today):
+                    d2['status'] = f"⚠️疑似未下单({owner}/上周散表)" if owner else "⚠️疑似未下单(上周散表未登总表)"
+                else:
+                    d2['status'] = f"⚠️大货表待登({owner})" if owner else "⚠️大货表待登(本周新单)"
                 
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
@@ -2042,16 +2065,25 @@ def analyze():
         if audit_key not in seen_audit_keys:
             seen_audit_keys.add(audit_key)
             deliv_str = item['delivery'].strftime('%Y-%m-%d') if isinstance(item['delivery'], datetime) else str(item['delivery'])
+            src = item.get('source', '')
+            is_old = is_older_than_last_week(src, base_date=today)
+            if is_old:
+                err_type = '⚠️ 疑似临时改动/未下单'
+                sugg = f"该翻单来源于上周或更早散表（{src}），但在当周生产大货总表中查无登记，疑似临时改动且未实际向工厂下单，请核对是否已取消"
+            else:
+                err_type = '⚠️ 本周新单待总表登记'
+                sugg = f"本周微信散表（{src}）最新下单，当周生产大货总表尚未同步录入，请生产部及时补登"
+
             audit_errors.append({
                 'code': item['code'],
                 'skc': item['skc'],
                 'color': item['color'],
-                'type': '⚠️ 大货总表未登记',
-                'source': item.get('source', ''),
+                'type': err_type,
+                'source': src,
                 'raw_delivery': deliv_str,
                 'qty': item['qty'],
                 'owner_factory': f"{item.get('owner', '')} / {item.get('factory', '')}",
-                'suggestion': "微信群中有下单记录，但生产大货总表中未见此批翻单，需核实补登"
+                'suggestion': sugg
             })
             
     # 3. 翻单款但在店铺主商品表《SG网红店商品表.xlsx》中查无此款 (未建档)
@@ -2235,7 +2267,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     draw_legend_box(ws1, 22, [
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
-        ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货')
+        ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
+        ('F8CBAD', '⚠️ 疑似未下单', '上周或更早散表但在当周总表中无记录，疑似临时改动未实际下单')
     ], title="🎨 到货跟进告示板")
 
     # ── Sheet2: 库存回补 ─────────────────────────────────────────────
