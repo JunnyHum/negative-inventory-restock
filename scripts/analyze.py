@@ -1889,10 +1889,27 @@ def analyze():
                 d2['delivery'] = actual_date.strftime('%Y-%m-%d')
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             
-            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记（本周新单待总表登记）
+            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记（本周新单待总表登记，带文件名日期）
             if skc not in master_progress_skcs:
                 owner = d.get('status') or ''
-                d2['status'] = f"⚠️大货表待登({owner})" if owner else "⚠️大货表待登(本周新单)"
+                src = d.get('source') or ''
+                bname = os.path.basename(src) if src else ''
+                m_date = re.search(r'(\d{2})[-_.]?(\d{2})', bname) if bname else None
+                date_tag = f"{m_date.group(1)}{m_date.group(2)}" if m_date else ""
+                
+                label_parts = []
+                if date_tag:
+                    label_parts.append(date_tag)
+                if owner and owner not in label_parts:
+                    label_parts.append(owner)
+                elif not owner:
+                    for cand in ['唐', '桥', '天猫']:
+                        if cand in bname and cand not in label_parts:
+                            label_parts.append(cand)
+                            break
+                            
+                tag_str = "".join(label_parts) if label_parts else "本周新单"
+                d2['status'] = f"⚠️大货表待登({tag_str})"
                 
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
@@ -2279,7 +2296,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
         ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
-        ('F8CBAD', '⚠️ 疑似未下单', '上周或更早散表但在当周总表中无记录，疑似临时改动未实际下单')
+        ('F8CBAD', '⚠️ 大货表待登', '本周微信散表最新下单，生产总表尚未同步录入，已标注对应散表日期与发起人')
     ], title="🎨 到货跟进告示板")
 
     # ── Sheet2: 库存回补 ─────────────────────────────────────────────
