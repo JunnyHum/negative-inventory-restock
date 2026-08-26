@@ -426,13 +426,21 @@ def load_product_table(filepath):
                 listDate = row[date_col] if (date_col is not None and len(row) > date_col) else None
                 statusVal = str(row[status_col]).strip() if (status_col is not None and len(row) > status_col and row[status_col]) else ''
                 
+                prod_obj = {
+                    '上架日期': listDate,
+                    '商品状态': statusVal,
+                }
                 if productCode not in result or (listDate and not result[productCode].get('上架日期')):
-                    result[productCode] = {
-                        '上架日期': listDate,
-                        '商品状态': statusVal,
-                    }
+                    result[productCode] = prod_obj
+                
+                # 智能识别整行/备注中出现的所有同链接副款号（如在备注中写 NE230332）
+                row_text = ' '.join(str(c) for c in row if c is not None)
+                extra_codes = re.findall(r'\b[A-Z]{2}\d{6}\b', row_text)
+                for extra_c in extra_codes:
+                    if extra_c not in result:
+                        result[extra_c] = prod_obj
         wb.close()
-        logger.info("店铺商品表全表匹配款号: %d个", len(result))
+        logger.info("店铺商品表全表匹配款号(含同链接副款号): %d个", len(result))
         return result
     except Exception as e:
         logger.warning("加载店铺商品表失败: %s", e)
