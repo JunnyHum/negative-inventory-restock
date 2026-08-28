@@ -1890,7 +1890,7 @@ def analyze():
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             
             # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记（本周新单待总表登记，带文件名日期）
-            if skc not in master_progress_skcs:
+            if d.get('is_omitted_from_master', False):
                 owner = d.get('status') or ''
                 src = d.get('source') or ''
                 bname = os.path.basename(src) if src else ''
@@ -1920,7 +1920,7 @@ def analyze():
         全局跨源尺码签名去重与交期融合引擎
         同一 SKC 下各尺码数量完全一致（sz_signature 相同）视为同一笔翻单：
         1. 交期裁决：剔除'交期未填/待定'，优先选取有具体交期的版本；若有多个具体交期，以最新校准（最晚有效交期）为准。
-        2. 生产状态融合：优先保留包含具体生产进度描述（如'在绣花'、'没面料'、'正在印花中'等）的状态。
+        2. 生产状态融合：优先保留包含具体生产进度描述（如'在绣花'、'没面料'、'正在印花中'、'待登'等）的状态。
         3. 工厂融合：优先选取有效非空工厂名（排除 #N/A 和空）。
         4. 数据源融合：若为客服表，合并多源文件名（如 微信散表 + 大货表）。
         """
@@ -1959,7 +1959,7 @@ def analyze():
             statuses = [it[2].get('status', '') for it in item_list if it[2].get('status') and str(it[2].get('status')) != 'None']
             detailed_status = ''
             for st in statuses:
-                if any(kw in str(st) for kw in ['中', '在', '料', '定做', '订做', '改', '裁', '开板', '已出清', '缺失', '到仓']):
+                if any(kw in str(st) for kw in ['中', '在', '料', '定做', '订做', '改', '裁', '开板', '已出清', '缺失', '到仓', '待登']):
                     detailed_status = str(st)
                     break
             if not detailed_status and statuses:
