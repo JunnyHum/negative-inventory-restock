@@ -416,6 +416,8 @@ def load_product_table(filepath):
             if code_col is None:
                 continue
                 
+            # 第一轮（Pass 1）：先完整提取所有具备独立商品编码的主款号记录
+            rows_data = []
             for row in rows[header_idx + 1:]:
                 if not row or len(row) <= code_col:
                     continue
@@ -429,28 +431,47 @@ def load_product_table(filepath):
                 prod_obj = {
                     '上架日期': listDate,
                     '商品状态': statusVal,
+                    'isPrimary': True
                 }
                 if productCode not in result or (listDate and not result[productCode].get('上架日期')):
                     result[productCode] = prod_obj
-                
-                # 智能识别整行/备注中出现的所有同链接副款号（如在备注中写 NE230332、WE040303）
+                rows_data.append((productCode, row, prod_obj))
+
+            # 第二轮（Pass 2：防呆校验）：解析备注/整行中的副款号，若副款号已有独立商品主记录则强制拦截拒绝覆盖
+            primary_codes = set(result.keys())
+            for mainCode, row, prod_obj in rows_data:
                 row_text = ' '.join(str(c) for c in row if c is not None)
-                extra_codes = re.findall(r'\b[A-Z]{2}\d{6}\b', row_text)
+                extra_codes = set(re.findall(r'\b[A-Z]{2}\d{6}\b', row_text))
                 for extra_c in extra_codes:
+                    if extra_c == mainCode:
+                        continue
+                    if extra_c in primary_codes:
+                        # 核心防呆：该款号本身就是商品表中独立上架的主款，严禁被当作副款号覆盖绑定！
+                        continue
                     if extra_c not in result:
-                        result[extra_c] = prod_obj
+                        sub_obj = dict(prod_obj)
+                        sub_obj['isPrimary'] = False
+                        sub_obj['mainCode'] = mainCode
+                        result[extra_c] = sub_obj
+
         wb.close()
         
-        # 内置核心同链接别名兜底映射（如 303半高领与302圆领、NE230332与NE230316）
+        # 内置核心同链接别名兜底映射（带独立款冲突防呆拦截）
         product_code_aliases = {
             'NE230332': 'NE230316',  # 与NE230316同链接合并上架
             'WE040303': 'WE040302',  # 与WE040302同链接合并上架（303半高领 / 302圆领）
         }
         for alias_c, main_c in product_code_aliases.items():
+            if alias_c in result and result[alias_c].get('isPrimary', False):
+                logger.warning("[防呆拦截] 款号 %s 在商品表中已有独立主记录，拒绝作为 %s 的副款绑定！", alias_c, main_c)
+                continue
             if alias_c not in result and main_c in result:
-                result[alias_c] = dict(result[main_c])
+                sub_obj = dict(result[main_c])
+                sub_obj['isPrimary'] = False
+                sub_obj['mainCode'] = main_c
+                result[alias_c] = sub_obj
                 
-        logger.info("店铺商品表全表匹配款号(含同链接副款号): %d个", len(result))
+        logger.info("店铺商品表全表匹配款号(含防呆校验副款号): %d个", len(result))
         return result
     except Exception as e:
         logger.warning("加载店铺商品表失败: %s", e)
