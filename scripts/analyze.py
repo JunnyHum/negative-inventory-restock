@@ -441,10 +441,9 @@ def load_product_table(filepath):
                         result[extra_c] = prod_obj
         wb.close()
         
-        # 内置核心同链接别名兜底映射（如 303半高领与302圆领、NE230316同链接包含332与323）
+        # 内置核心同链接别名兜底映射（如 303半高领与302圆领、NE230332与NE230316）
         product_code_aliases = {
             'NE230332': 'NE230316',  # 与NE230316同链接合并上架
-            'NE230323': 'NE230316',  # 与NE230316同链接合并上架
             'WE040303': 'WE040302',  # 与WE040302同链接合并上架（303半高领 / 302圆领）
         }
         for alias_c, main_c in product_code_aliases.items():
