@@ -433,13 +433,24 @@ def load_product_table(filepath):
                 if productCode not in result or (listDate and not result[productCode].get('上架日期')):
                     result[productCode] = prod_obj
                 
-                # 智能识别整行/备注中出现的所有同链接副款号（如在备注中写 NE230332）
+                # 智能识别整行/备注中出现的所有同链接副款号（如在备注中写 NE230332、WE040303）
                 row_text = ' '.join(str(c) for c in row if c is not None)
                 extra_codes = re.findall(r'\b[A-Z]{2}\d{6}\b', row_text)
                 for extra_c in extra_codes:
                     if extra_c not in result:
                         result[extra_c] = prod_obj
         wb.close()
+        
+        # 内置核心同链接别名兜底映射（如 303半高领与302圆领、NE230316同链接包含332与323）
+        product_code_aliases = {
+            'NE230332': 'NE230316',  # 与NE230316同链接合并上架
+            'NE230323': 'NE230316',  # 与NE230316同链接合并上架
+            'WE040303': 'WE040302',  # 与WE040302同链接合并上架（303半高领 / 302圆领）
+        }
+        for alias_c, main_c in product_code_aliases.items():
+            if alias_c not in result and main_c in result:
+                result[alias_c] = dict(result[main_c])
+                
         logger.info("店铺商品表全表匹配款号(含同链接副款号): %d个", len(result))
         return result
     except Exception as e:
