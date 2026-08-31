@@ -1137,6 +1137,25 @@ def analyze():
                 pass
         return False
 
+    def is_older_than_two_weeks(source_name, base_date=today):
+        """
+        判断该翻单散表是否早于上上周一（14天以前的古老散表）
+        """
+        if not source_name:
+            return False
+        bname = os.path.basename(str(source_name))
+        m = re.search(r'(\d{2})(\d{2})', bname)
+        if m:
+            try:
+                mm, dd = int(m.group(1)), int(m.group(2))
+                if 1 <= mm <= 12 and 1 <= dd <= 31:
+                    f_dt = datetime(base_date.year, mm, dd)
+                    two_weeks_ago_monday = base_date - timedelta(days=base_date.weekday() + 7)
+                    return f_dt < two_weeks_ago_monday
+            except Exception:
+                pass
+        return False
+
     # ── 1. 加载当前仓库 ──────────────────────────────────────────────
     wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes = load_warehouse(wh_file)
 
@@ -1542,6 +1561,23 @@ def analyze():
                 })
         wb2.close()
 
+    # ── 核心判定：检测生产部大货总表本周是否已经更新 ──────────────────────────────
+    master_files_check = [f for f in (list(sg_files) + list(nba_files)) if f and os.path.exists(f)]
+    latest_master_mtime = None
+    for mf in master_files_check:
+        mt = datetime.fromtimestamp(os.path.getmtime(mf))
+        if latest_master_mtime is None or mt > latest_master_mtime:
+            latest_master_mtime = mt
+            
+    monday_start = today - timedelta(days=today.weekday())
+    monday_start = monday_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    is_master_updated = (latest_master_mtime is not None and latest_master_mtime >= monday_start)
+    
+    logger.info("🎯 生产部大货总表更新状态判定: %s (文件最新修改时间: %s, 本周一基准点: %s)",
+                "✅ 本周已更新" if is_master_updated else "❌ 本周未更新(停留在上周或更早)",
+                latest_master_mtime.strftime('%Y-%m-%d %H:%M:%S') if latest_master_mtime else "无",
+                monday_start.strftime('%Y-%m-%d'))
+
     # ── 3.5 扫描并加载独立翻单表 ──────────────────────────────────────
     try:
         desktop_dir = os.path.expanduser(paths.get('restock_dir') or '/Users/junny/Desktop/淘宝店铺/生产部补单表/')
@@ -1892,11 +1928,32 @@ def analyze():
                 continue
 
         src = d.get('source') or ''
-        # 判定是否属于「历史散表提出、但在当周大货总表中无在途记录」的未下单/取消条目
-        is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_last_week(src, base_date=today))
+        # 核心判定重构：根据生产部大货总表本周是否更新，自适应决定散单的纳管规则
+        # 若总表【已更新】：早于本周一发出的历史散表且总表中查无记录，认定为因改动未实际下单，踢出 Sheet 1/4
+        # 若总表【未更新】（如周一生产部未上传新总表）：上周发出的散表（如 0824唐、0826唐、0826桥）绝对不判为取消，全量保留纳入窗口期到货与客服表！
+        if is_master_updated:
+            is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_last_week(src, base_date=today))
+        else:
+            is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_two_weeks(src, base_date=today))
+
+        # 提前解析散表文件名日期与负责人前缀标签
+        owner = d.get('status') or ''
+        bname = os.path.basename(src) if src else ''
+        m_date = re.search(r'(\d{2})[-_.]?(\d{2})', bname) if bname else None
+        date_tag = f"{m_date.group(1)}{m_date.group(2)}" if m_date else ""
+        label_parts = []
+        if date_tag:
+            label_parts.append(date_tag)
+        if owner and owner not in label_parts:
+            label_parts.append(owner)
+        elif not owner:
+            for cand in ['唐', '桥', '天猫']:
+                if cand in bname and cand not in label_parts:
+                    label_parts.append(cand)
+                    break
+        tag_str = "".join(label_parts) if label_parts else "散表"
 
         # 客服专用参考：只要在窗口期内（window_start <= actual_date <= customer_window_end），即便是出清条目也记录到客服专用 Sheet
-        # 严格排除：历史散表但在当周总表中无在途记录的条目（属于因改动未实际下单的记录，避免误导客服）
         if not is_unconfirmed_old and window_start <= actual_date <= customer_window_end:
             d_cust = dict(d)
             if d.get('is_missing_delivery'):
@@ -1904,9 +1961,16 @@ def analyze():
             else:
                 d_cust['delivery'] = actual_date.strftime('%Y-%m-%d')
             d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
+            
+            # 客服专用表状态高亮打标
+            if d.get('is_omitted_from_master', False):
+                if not is_master_updated:
+                    d_cust['status'] = f"⚠️大货总表未更新待登记({tag_str})"
+                else:
+                    d_cust['status'] = f"⚠️大货表待登({tag_str})"
             customer_results.append((skc, actual_date, d_cust))
 
-        # 标准窗口期到货（Sheet1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在标准 window_end 内）
+        # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在标准 window_end 内）
         if d.get('is_cleared', False): continue
         if is_unconfirmed_old: continue
         if skc not in neg_skcs: continue
@@ -1920,27 +1984,12 @@ def analyze():
                 d2['delivery'] = actual_date.strftime('%Y-%m-%d')
             d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
             
-            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记（本周新单待总表登记，带文件名日期）
+            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记
             if d.get('is_omitted_from_master', False):
-                owner = d.get('status') or ''
-                src = d.get('source') or ''
-                bname = os.path.basename(src) if src else ''
-                m_date = re.search(r'(\d{2})[-_.]?(\d{2})', bname) if bname else None
-                date_tag = f"{m_date.group(1)}{m_date.group(2)}" if m_date else ""
-                
-                label_parts = []
-                if date_tag:
-                    label_parts.append(date_tag)
-                if owner and owner not in label_parts:
-                    label_parts.append(owner)
-                elif not owner:
-                    for cand in ['唐', '桥', '天猫']:
-                        if cand in bname and cand not in label_parts:
-                            label_parts.append(cand)
-                            break
-                            
-                tag_str = "".join(label_parts) if label_parts else "本周新单"
-                d2['status'] = f"⚠️大货表待登({tag_str})"
+                if not is_master_updated:
+                    d2['status'] = f"⚠️大货总表未更新待登记({tag_str})"
+                else:
+                    d2['status'] = f"⚠️大货表待登({tag_str})"
                 
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
