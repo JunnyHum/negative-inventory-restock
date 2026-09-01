@@ -323,6 +323,8 @@ def load_warehouse(filepath):
     wh_code_idx = col_indexes['virtualWhCode']
     wh_name_idx = col_indexes['virtualWhName']
 
+    wh_color_map = {}   # (code, clean_color_name) -> color_code
+
     for row in ws.iter_rows(min_row=2):
         rd = [c.value for c in row]
         if len(rd) <= max(code_idx, spec_idx):
@@ -364,6 +366,10 @@ def load_warehouse(filepath):
 
         if color_txt:
             wh_colors_txt[skc] = str(color_txt)
+            if code and color_code:
+                c_clean = re.sub(r'\[\d+\]', '', str(color_txt)).strip()
+                wh_color_map[(code, c_clean)] = color_code
+                wh_color_map[(code, str(color_txt).strip())] = color_code
 
         wh_neg_total[skc]  += kexiao
         whEntityTotal[skc]  += entity
@@ -376,8 +382,8 @@ def load_warehouse(filepath):
             wh_tw011_stock[skc][size_name] += entity
 
     wb.close()
-    logger.info("新格式解析: %d个SKC", len(wh_neg_total))
-    return wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes
+    logger.info("新格式解析: %d个SKC, 抽取颜色编号映射: %d条", len(wh_neg_total), len(wh_color_map))
+    return wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes, wh_color_map
 
 # ── 店铺商品表（全 Sheet 动态识别）───────────────────────────────────────────
 def load_product_table(filepath):
@@ -978,9 +984,14 @@ def parse_individual_restock_file(filepath):
                 spec_raw = str(rd[indexes['spec']]).strip() if rd[indexes['spec']] else ''
                 if len(spec_raw) == 12 and spec_raw[:8] == pc:
                     cc_candidates.add(spec_raw[8:10])
-            # 两路都失败时保留 '?' 占位，便于后续排查
-            if not cc_candidates:
-                cc_candidates.add('?')
+            # 两路都失败时，使用智能自愈补全引擎反查映射库补全
+            if not cc_candidates or '?' in cc_candidates:
+                resolved_cc = resolve_color_code(pc, color)
+                if resolved_cc != '?':
+                    cc_candidates.discard('?')
+                    cc_candidates.add(resolved_cc)
+                elif not cc_candidates:
+                    cc_candidates.add('?')
             
             size_raw = rd[indexes['size']]
             size_name = parse_size_name_from_text(size_raw)
@@ -1157,7 +1168,39 @@ def analyze():
         return False
 
     # ── 1. 加载当前仓库 ──────────────────────────────────────────────
-    wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes = load_warehouse(wh_file)
+    wh_neg_total, wh_neg_size, whEntityTotal, wh_colors_txt, wh_tw011_avail, wh_tw011_stock, wh_actual_sizes, wh_color_map = load_warehouse(wh_file)
+
+    def resolve_color_code(pc: str, color_str: str, spec_raw: str = None) -> str:
+        """
+        通用智能自愈颜色编号解析器：
+        1. 优先正则提取 [XX] 里面的数字
+        2. 其次提取条码 spec_raw (SKU/SKC) 的第 8~10 位数字
+        3. 若均为纯中文（如'花色'），反查全局 wh_color_map 自动补全真实颜色编号
+        4. 退避回退至 '?'
+        """
+        if not color_str:
+            color_str = ''
+        color_str_str = str(color_str).strip()
+        mc = re.search(r'\[(\d+)\]', color_str_str)
+        if mc:
+            return mc.group(1)
+            
+        if spec_raw:
+            spec_str = str(spec_raw).strip()
+            if len(spec_str) >= 10 and spec_str[8:10].isdigit():
+                return spec_str[8:10]
+                
+        color_clean = re.sub(r'\[\d+\]', '', color_str_str).strip()
+        if pc and color_clean and wh_color_map:
+            if (pc, color_clean) in wh_color_map:
+                return wh_color_map[(pc, color_clean)]
+            if (pc, color_str_str) in wh_color_map:
+                return wh_color_map[(pc, color_str_str)]
+            for (k_pc, k_name), k_cc in wh_color_map.items():
+                if k_pc == pc and (color_clean in k_name or k_name in color_clean):
+                    return k_cc
+                    
+        return '?'
 
     # 判断均码款
     product_is_junma = {}
@@ -1226,7 +1269,7 @@ def analyze():
     prev_tw011_stock = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
     if prev_wh_file:
         logger.info("前日仓库文件: %s", prev_wh_file)
-        prev_neg_total, prev_neg_size, _, _, prev_tw011_avail, prev_tw011_stock, _ = load_warehouse(prev_wh_file)
+        prev_neg_total, prev_neg_size, _, _, prev_tw011_avail, prev_tw011_stock, _, _ = load_warehouse(prev_wh_file)
 
     product_table = load_product_table(paths.get('product_table'))
     today_date = datetime.now().date()
@@ -1336,8 +1379,8 @@ def analyze():
                                 master_active_code_colors.add((pc, cc_raw))
                                 
                     color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
-                    mc = re.search(r'\[(\d+)\]', color)
-                    cc = mc.group(1) if mc else '?'
+                    spec_val_sg = str(rd[sg_indexes['spec']]).strip() if (sg_indexes.get('spec') is not None and len(rd) > sg_indexes['spec'] and rd[sg_indexes['spec']]) else None
+                    cc = resolve_color_code(pc, color, spec_val_sg)
                     skc = pc + cc
                     
                     # 实际到仓时间 / 实际出货时间 提取（带回退）
@@ -1507,8 +1550,8 @@ def analyze():
                             master_active_code_colors.add((pc, cc_raw2))
                             
                 color = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
-                mc = re.search(r'\[(\d+)\]', color)
-                cc = mc.group(1) if mc else '?'
+                spec_val_nba = str(rd[nba_indexes['spec']]).strip() if (nba_indexes.get('spec') is not None and len(rd) > nba_indexes['spec'] and rd[nba_indexes['spec']]) else None
+                cc = resolve_color_code(pc, color, spec_val_nba)
                 skc = pc + cc
                 
                 # 实际到仓时间 / 实际出货时间 提取（带回退）
