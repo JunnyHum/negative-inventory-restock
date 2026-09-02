@@ -1217,19 +1217,27 @@ def analyze():
         if code in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
             continue
         is_junma = product_is_junma.get(code, False)
-        sizes   = wh_neg_size.get(skc, {})
-        if is_junma:
+        sizes = wh_neg_size.get(skc, {})
+        active_sizes = wh_actual_sizes.get(code, set())
+        
+        if is_junma or '均码' in active_sizes:
             if sizes.get('均码', 0) < 10:
                 neg_skcs[skc] = qty
         else:
-            has_neg_size = False
-            for s in ['XS', 'S', 'M', 'L', 'XL', '2XL']:
-                if sizes.get(s, 0) < 10:
-                    has_neg_size = True
-                    break
+            # 仅在【该款实际在售/建档发售的尺码范围】中检查是否缺货 (< 10)
+            # 绝不因为未做 XS 码（返回 0）而误判为 XS 缺货！
+            check_sizes = [s for s in ['XS', 'S', 'M', 'L', 'XL', '2XL'] if s in active_sizes]
+            if not check_sizes:
+                check_sizes = ['S', 'M', 'L', 'XL', '2XL']
+                
+            has_neg_size = any(sizes.get(s, 0) < 10 for s in check_sizes)
+            # 兜底：若任何尺码出现超卖负库存（< 0），无论是否在 active_sizes 中，均触发报警
+            if not has_neg_size:
+                has_neg_size = any(sizes.get(s, 0) < 0 for s in ['XS', 'S', 'M', 'L', 'XL', '2XL', '均码'])
+                
             if has_neg_size:
                 neg_skcs[skc] = qty
-    logger.info("可销<10的SKC: %d", len(neg_skcs))
+    logger.info("可销<10的SKC (精准过滤未发售XS): %d", len(neg_skcs))
 
     # ── 2. 加载前一天的仓库（用于Sheet2库存回补）────────────────────
     all_dirs = [
