@@ -53,7 +53,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 SIZE_KEYS = ['XS', 'S', 'M', 'L', 'XL', '2XL', '均码']
-SIZE_LAST_MAP = {'4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL', '0': '均码'}
+SIZE_LAST_MAP = {'3': 'XS', '4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL', '0': '均码'}
 
 # 本店铺未上架商品黑名单/排除款号（用户指定不纳入分析记录的非本店铺销售款式）
 EXCLUDED_UNOFFICIAL_CODES = {'WD920217'}
@@ -655,7 +655,7 @@ def has_skc_stock(skc, sizes, is_junma):
     if is_junma:
         return (sizes.get('均码', 0) > 0)
     else:
-        for s in ['S', 'M', 'L', 'XL', '2XL']:
+        for s in ['XS', 'S', 'M', 'L', 'XL', '2XL']:
             if (sizes.get(s, 0) > 0):
                 return True
         return False
@@ -679,12 +679,12 @@ def findColumnIndexes(headerCells: list) -> dict:
     
     # 尺码名与列名匹配正则
     size_patterns = {
-        'XS': [r'^xs$'],
-        'S': [r'^s$', r'^s/'],
-        'M': [r'^m$', r'^m/'],
-        'L': [r'^l$', r'^l/'],
-        'XL': [r'^xl$', r'^xl/'],
-        '2XL': [r'^xxl$', r'^xxl/', r'^2xl$', r'^2xl/'],
+        'XS': [r'^xs$', r'^xs/', r'^xs\(', r'^加小'],
+        'S': [r'^s$', r'^s/', r'^s\('],
+        'M': [r'^m$', r'^m/', r'^m\('],
+        'L': [r'^l$', r'^l/', r'^l\('],
+        'XL': [r'^xl$', r'^xl/', r'^xl\('],
+        '2XL': [r'^xxl$', r'^xxl/', r'^2xl$', r'^2xl/', r'^2xl\('],
         '均码': [r'^均码$', r'^f/均码$', r'^f$']
     }
 
@@ -1223,7 +1223,7 @@ def analyze():
                 neg_skcs[skc] = qty
         else:
             has_neg_size = False
-            for s in ['S', 'M', 'L', 'XL', '2XL']:
+            for s in ['XS', 'S', 'M', 'L', 'XL', '2XL']:
                 if sizes.get(s, 0) < 10:
                     has_neg_size = True
                     break
@@ -1432,7 +1432,7 @@ def analyze():
                                     row_sizes[max_sz] += diff
                             else:
                                 # 平摊
-                                valid_sizes = [s for s in ['S', 'M', 'L', 'XL', '2XL'] if s in row_sizes]
+                                valid_sizes = [s for s in ['XS', 'S', 'M', 'L', 'XL', '2XL'] if s in row_sizes]
                                 if valid_sizes:
                                     base_qty = total_qty_val // len(valid_sizes)
                                     rem = total_qty_val % len(valid_sizes)
@@ -2364,8 +2364,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws1 = wb.active
     ws1.title = '窗口期到货'
     headers1 = ['款号', 'SKC编码', '颜色', '仓库可销',
-                 'S', 'M', 'L', 'XL', '2XL', '均码',
-                 '批次数量', 'S', 'M', 'L', 'XL', '2XL', '均码',
+                 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
+                 '批次数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '到货日期', '生产状态', '工厂']
     ws1.append(headers1)
     for ci, h in enumerate(headers1, 1):
@@ -2384,10 +2384,12 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         row = [
             skc[:8], skc, wh_color,
             round(wh_total, 0),
+            round(wh_sizes.get('XS', 0), 0),
             round(wh_sizes.get('S', 0), 0), round(wh_sizes.get('M', 0), 0),
             round(wh_sizes.get('L', 0), 0), round(wh_sizes.get('XL', 0), 0),
             round(wh_sizes.get('2XL', 0), 0), round(wh_sizes.get('均码', 0), 0),
             round(restock_total, 0),
+            round(d['sizes'].get('XS', 0), 0),
             round(d['sizes'].get('S', 0), 0), round(d['sizes'].get('M', 0), 0),
             round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
@@ -2408,14 +2410,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 8]
+    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 20, 8]
     for ci, w in enumerate(cw1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
     ws1.freeze_panes = 'A2'
     ws1.auto_filter.ref = f"A1:{get_column_letter(ws1.max_column)}{ws1.max_row}"
 
     # 绘制 Sheet1 右侧告示区
-    draw_legend_box(ws1, 22, [
+    draw_legend_box(ws1, 24, [
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
         ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
@@ -2542,8 +2544,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
 
     ws4 = wb.create_sheet('客服专用_到货参考')
     headers4 = ['款号', 'SKC编码', '颜色', '仓库可销',
-                 'S', 'M', 'L', 'XL', '2XL', '均码',
-                 '批次到货数量', 'S', 'M', 'L', 'XL', '2XL', '均码',
+                 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
+                 '批次到货数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '预计到货日期', '生产状态', '工厂', '翻单数据源']
     ws4.append(headers4)
     for ci, h in enumerate(headers4, 1):
@@ -2561,10 +2563,12 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         row = [
             skc[:8], skc, wh_color,
             round(wh_total, 0),
+            round(wh_sizes.get('XS', 0), 0),
             round(wh_sizes.get('S', 0), 0), round(wh_sizes.get('M', 0), 0),
             round(wh_sizes.get('L', 0), 0), round(wh_sizes.get('XL', 0), 0),
             round(wh_sizes.get('2XL', 0), 0), round(wh_sizes.get('均码', 0), 0),
             round(restock_total, 0),
+            round(d['sizes'].get('XS', 0), 0),
             round(d['sizes'].get('S', 0), 0), round(d['sizes'].get('M', 0), 0),
             round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
@@ -2580,14 +2584,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
+    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
     for ci, w in enumerate(cw4, 1):
         ws4.column_dimensions[get_column_letter(ci)].width = w
     ws4.freeze_panes = 'A2'
     ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
     # 绘制 Sheet4 右侧客服专属告示区
-    draw_legend_box(ws4, 23, [
+    draw_legend_box(ws4, 25, [
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
