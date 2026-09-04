@@ -831,11 +831,20 @@ def get_color_category_name(color_txt, skc=''):
     return '其他色系'
 
 
-def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
+def findApproxColorMatches(negSkcs, allRestock, skcHasAny, wh_all_skcs=None):
     """
-    对无精确翻单匹配的负库存 SKC,检查同款号下是否有同色系其他颜色的翻单记录。
-    只有同色系才认为可近似(2026-06-04 Junny 修复)。
+    对无精确翻单匹配的负库存 SKC, 检查同款号下是否有同色系其他颜色的翻单记录。
+    
+    【核心规则 - 用户明确指示：近似不移除，只是在没有完全对应颜色的情况下，给出近似的提示】：
+    1. 若某笔翻单 altSkc 在仓库中已有完全对应的商品档案 (altSkc in wh_all_skcs)，
+       说明该翻单是针对该颜色专门下的翻单 (已有完全对应颜色)，
+       绝不能将其再借用给同色系的其他颜色 (例如 [60]粉红 已有完全对应，不能再借给 [63]藕粉红产生误导)！
+    2. 只有当某笔翻单在仓库中【没有完全对应颜色】(如生产部写了非标色号/别名，仓库中未建档该具体色号，但有同款同色系商品) 时，
+       才将其作为该色系对应缺货款的近似提示 (★色号差异(同色系):原[XX]→参考[YY])！
     """
+    if wh_all_skcs is None:
+        wh_all_skcs = set()
+
     approxMatches = []
     
     for skc in negSkcs:
@@ -849,11 +858,14 @@ def findApproxColorMatches(negSkcs, allRestock, skcHasAny):
         if origFamily is None:
             continue
         
-        # 收集同款号下所有有翻单记录的颜色
+        # 收集同款号下所有【在仓库中没有完全对应颜色】的翻单颜色
+        # 即：翻单本身没有完全对应颜色时，才给出近似提示！
+        # 若翻单本身有完全对应颜色，则属于精确对应，绝不产生跨色号克隆
         sameCodeRestockColors = set()
         for otherSkc in skcHasAny:
             if otherSkc[:8] == code:
-                sameCodeRestockColors.add(otherSkc[8:])
+                if otherSkc not in wh_all_skcs:
+                    sameCodeRestockColors.add(otherSkc[8:])
         
         # 只保留同色系的色号
         sameFamilyColors = {c for c in sameCodeRestockColors if _colorFamily(c) == origFamily}
@@ -2127,8 +2139,9 @@ def analyze():
     customer_results.sort(key=lambda x: (x[0][:8], x[2].get('delivery', ''), x[0]))
     logger.info("客服专用到货参考全量摘录(已跨源去重融合): %d条", len(customer_results))
 
-    # ── 5. 近似颜色匹配（P0 功能） ──────────────────────────────────────
-    approxMatches = findApproxColorMatches(neg_skcs, all_restock, skc_has_any)
+    # ── 5. 近似颜色匹配（P0 功能：仅在没有完全对应颜色的情况下提供近似提示） ──
+    wh_all_skcs_set = set(wh_neg_total.keys())
+    approxMatches = findApproxColorMatches(neg_skcs, all_restock, skc_has_any, wh_all_skcs=wh_all_skcs_set)
     approx_count = 0
     for match in approxMatches:
         deliv = match['delivery']
