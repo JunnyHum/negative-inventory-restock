@@ -2328,8 +2328,19 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     if not time_suffix:
         time_suffix = datetime.now().strftime('%Y%m%d%H%M%S')
         
-    out_path  = os.path.join(output_dir, f"窗口期到货_负库存_{time_suffix}.xlsx")
+    base_stem = f"窗口期到货_负库存_{time_suffix}"
+    out_path = os.path.join(output_dir, f"{base_stem}.xlsx")
     os.makedirs(output_dir, exist_ok=True)
+    
+    # 核心防覆盖规则：若已存在同名报表文件（例如同日多次跑批/总表更新重跑），自动追加时分秒或递增序号，绝不覆盖历史文件
+    if os.path.exists(out_path):
+        run_hms = datetime.now().strftime('%H%M%S')
+        candidate_path = os.path.join(output_dir, f"{base_stem}_{run_hms}.xlsx")
+        counter = 2
+        while os.path.exists(candidate_path):
+            candidate_path = os.path.join(output_dir, f"{base_stem}_{run_hms}_v{counter}.xlsx")
+            counter += 1
+        out_path = candidate_path
 
     wb = openpyxl.Workbook()
 
