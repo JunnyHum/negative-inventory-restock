@@ -1251,35 +1251,45 @@ def analyze():
                 neg_skcs[skc] = qty
     logger.info("可销<10的SKC (精准过滤未发售XS): %d", len(neg_skcs))
 
-    # ── 2. 加载前一天的仓库（用于Sheet2库存回补）────────────────────
+    # ── 2. 加载前一次的库存数据（用于Sheet2库存回补对比）─────────────
+    # 用户明确指示：不一定是昨日，而是根据前一次的库存数据来进行对比
     all_dirs = [
         (paths.get('warehouse_dir') or ''),
         (paths.get('feishu_inbound') or ''),
     ]
-    all_wh_files = []
+    raw_wh_files = []
     for d in all_dirs:
-        if d:
-            all_wh_files += sorted(glob.glob(os.path.join(d, '*.xlsx')), key=os.path.getmtime, reverse=True)
+        if d and os.path.exists(d):
+            raw_wh_files += glob.glob(os.path.join(d, '*.xlsx'))
 
-    # 过滤出所有合法的系统库存文件
+    def _extract_wh_timestamp(fpath):
+        b = os.path.basename(fpath)
+        m14 = re.search(r'(\d{14})', b)
+        if m14: return m14.group(1)
+        m8 = re.search(r'(\d{8})', b)
+        if m8: return m8.group(1) + '000000'
+        return str(int(os.path.getmtime(fpath)))
+
     valid_wh_files = []
-    for f in all_wh_files:
+    for f in raw_wh_files:
         f_basename = os.path.basename(f)
         if '系统库存导出' in f_basename and not f_basename.startswith('~$') and not f_basename.startswith('.~'):
             if f not in valid_wh_files:
                 valid_wh_files.append(f)
 
-    # 寻找当前 wh_file 降序排列中的下一个文件
+    # 全局按时间戳/修改时间从新到旧严格降序排序
+    valid_wh_files.sort(key=_extract_wh_timestamp, reverse=True)
+
+    # 寻找当前 wh_file 降序排列中的紧邻下一个文件（即前一次的库存数据）
     prev_wh_file = None
     try:
         cur_idx = valid_wh_files.index(wh_file)
         if cur_idx + 1 < len(valid_wh_files):
             prev_wh_file = valid_wh_files[cur_idx + 1]
     except ValueError:
-        # 降级：使用修改时间仅次于当前 wh_file 的前一个有效文件
-        cur_mtime = os.path.getmtime(wh_file)
+        cur_ts = _extract_wh_timestamp(wh_file)
         for f in valid_wh_files:
-            if os.path.getmtime(f) < cur_mtime and f != wh_file:
+            if _extract_wh_timestamp(f) < cur_ts and f != wh_file:
                 prev_wh_file = f
                 break
 
@@ -1288,7 +1298,7 @@ def analyze():
     prev_tw011_avail = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
     prev_tw011_stock = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
     if prev_wh_file:
-        logger.info("前日仓库文件: %s", prev_wh_file)
+        logger.info("前一次库存文件: %s", prev_wh_file)
         prev_neg_total, prev_neg_size, _, _, prev_tw011_avail, prev_tw011_stock, _, _ = load_warehouse(prev_wh_file)
 
     product_table = load_product_table(paths.get('product_table'))
@@ -1872,14 +1882,15 @@ def analyze():
                 continue
             is_junma = product_is_junma.get(code, False)
             
-            # 判断昨日与今日是否实际有库存（独享仓最高优先级）
+            # 判断前一次与本次是否实际有库存（独享仓最高优先级）
             prev_sizes = prev_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
             cur_sizes = wh_neg_size.get(skc, {k: 0.0 for k in SIZE_KEYS})
             
-            yesterday_has_stock = has_skc_stock(skc, prev_sizes, is_junma)
-            today_has_stock = has_skc_stock(skc, cur_sizes, is_junma)
+            prev_has_stock = has_skc_stock(skc, prev_sizes, is_junma)
+            cur_has_stock = has_skc_stock(skc, cur_sizes, is_junma)
             
-            if not yesterday_has_stock and today_has_stock:
+            # 核心回补条件：前一次无库存（断货/超卖），本次到货扫码入库恢复有库存
+            if not prev_has_stock and cur_has_stock:
                 productCode = skc[:8]
                 if productCode in product_table:
                     listDate = product_table[productCode].get('上架日期')
