@@ -2323,35 +2323,17 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     from datetime import datetime
     import re
     
-    time_suffix = ""
-    if wh_file:
-        basename = os.path.basename(wh_file)
-        # 尝试提取文件名中的14位时间戳 (如 20260707085544)
-        match_14 = re.search(r'(\d{14})', basename)
-        if match_14:
-            time_suffix = match_14.group(1)
-        else:
-            # 降级：提取8位日期并拼接当前时分秒
-            match_8 = re.search(r'(\d{8})', basename)
-            if match_8:
-                time_suffix = match_8.group(1) + datetime.now().strftime('%H%M%S')
-                
-    if not time_suffix:
-        time_suffix = datetime.now().strftime('%Y%m%d%H%M%S')
-        
-    base_stem = f"窗口期到货_负库存_{time_suffix}"
-    out_path = os.path.join(output_dir, f"{base_stem}.xlsx")
+    # 方案一：单一 14 位时间戳（以本次报表实际生成时间为准，格式: 窗口期到货_负库存_YYYYMMDDHHMMSS.xlsx）
+    # 彻底杜绝双重时间戳，保证与历史全部归档命名 100% 统一，且天然绝不覆盖
+    time_suffix = datetime.now().strftime('%Y%m%d%H%M%S')
+    out_path = os.path.join(output_dir, f"窗口期到货_负库存_{time_suffix}.xlsx")
     os.makedirs(output_dir, exist_ok=True)
     
-    # 核心防覆盖规则：若已存在同名报表文件（例如同日多次跑批/总表更新重跑），自动追加时分秒或递增序号，绝不覆盖历史文件
-    if os.path.exists(out_path):
-        run_hms = datetime.now().strftime('%H%M%S')
-        candidate_path = os.path.join(output_dir, f"{base_stem}_{run_hms}.xlsx")
-        counter = 2
-        while os.path.exists(candidate_path):
-            candidate_path = os.path.join(output_dir, f"{base_stem}_{run_hms}_v{counter}.xlsx")
-            counter += 1
-        out_path = candidate_path
+    # 极少数同秒并发碰撞兜底
+    counter = 2
+    while os.path.exists(out_path):
+        out_path = os.path.join(output_dir, f"窗口期到货_负库存_{time_suffix}_v{counter}.xlsx")
+        counter += 1
 
     wb = openpyxl.Workbook()
 
