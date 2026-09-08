@@ -439,17 +439,25 @@ def load_product_table(filepath):
                 listDate = row[date_col] if (date_col is not None and len(row) > date_col) else None
                 statusVal = str(row[status_col]).strip() if (status_col is not None and len(row) > status_col and row[status_col]) else ''
                 item_id = str(row[item_id_col]).strip() if (item_id_col is not None and len(row) > item_id_col and row[item_id_col]) else ''
+                if item_id == 'None':
+                    item_id = ''
+                elif item_id.endswith('.0'):
+                    item_id = item_id[:-2]
                 
                 prod_obj = {
                     '上架日期': listDate,
                     '商品状态': statusVal,
-                    'isPrimary': is_main_sheet
+                    'isPrimary': is_main_sheet,
+                    'itemId': item_id,
+                    'mainCode': productCode
                 }
                 if is_main_sheet and item_id:
                     item_id_to_main_code[item_id] = (productCode, prod_obj)
 
                 if productCode not in result or (listDate and not result[productCode].get('上架日期')):
                     result[productCode] = prod_obj
+                elif item_id and not result[productCode].get('itemId'):
+                    result[productCode]['itemId'] = item_id
                 rows_data.append((productCode, item_id, row, prod_obj))
 
             # 第二轮（Pass 2：防呆校验）：解析服饰正价等主表备注/整行中的副款号（如加棉款号）
@@ -467,6 +475,7 @@ def load_product_table(filepath):
                         sub_obj = dict(prod_obj)
                         sub_obj['isPrimary'] = False
                         sub_obj['mainCode'] = mainCode
+                        sub_obj['itemId'] = prod_obj.get('itemId', '') or item_id
                         result[extra_c] = sub_obj
 
             # 第三轮（Pass 3：区间价格/同链接多款号自愈关联）：
@@ -480,10 +489,14 @@ def load_product_table(filepath):
                                 sub_obj = dict(main_prod)
                                 sub_obj['isPrimary'] = False
                                 sub_obj['mainCode'] = main_c
+                                sub_obj['itemId'] = main_prod.get('itemId', '') or item_id
                                 sub_obj['isIntervalPadded'] = True
                                 result[productCode] = sub_obj
                             else:
                                 result[productCode]['mainCode'] = main_c
+                                result[productCode]['isPrimary'] = False
+                                if not result[productCode].get('itemId'):
+                                    result[productCode]['itemId'] = main_prod.get('itemId', '') or item_id
 
         wb.close()
         
@@ -500,7 +513,13 @@ def load_product_table(filepath):
                 sub_obj = dict(result[main_c])
                 sub_obj['isPrimary'] = False
                 sub_obj['mainCode'] = main_c
+                sub_obj['itemId'] = result[main_c].get('itemId', '')
                 result[alias_c] = sub_obj
+            elif alias_c in result and main_c in result:
+                if not result[alias_c].get('isPrimary', False):
+                    result[alias_c]['mainCode'] = main_c
+                    if not result[alias_c].get('itemId'):
+                        result[alias_c]['itemId'] = result[main_c].get('itemId', '')
                 
         logger.info("店铺商品表全表匹配款号(含防呆校验副款号): %d个", len(result))
         return result
@@ -2460,13 +2479,29 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ws.column_dimensions[get_column_letter(c1)].width = 24
         ws.column_dimensions[get_column_letter(c2)].width = 46
 
+    def get_link_info(code):
+        """若为同链接衍生款/加棉款，返回 '主款号 / 商品ID'；若为主款或独立款，返回空字符串。"""
+        if not product_table or code not in product_table:
+            return ''
+        info = product_table[code]
+        if not info.get('isPrimary', True):
+            main_c = info.get('mainCode', '')
+            item_id = info.get('itemId', '')
+            if main_c and item_id:
+                return f"{main_c} / {item_id}"
+            elif main_c:
+                return str(main_c)
+            elif item_id:
+                return str(item_id)
+        return ''
+
     # ── Sheet1: 窗口期到货 ───────────────────────────────────────────
     ws1 = wb.active
     ws1.title = '窗口期到货'
     headers1 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
-                 '到货日期', '生产状态', '工厂']
+                 '到货日期', '生产状态', '工厂', '同链接主款/商品ID']
     ws1.append(headers1)
     for ci, h in enumerate(headers1, 1):
         cell = ws1.cell(1, ci)
@@ -2480,6 +2515,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
         entity   = whEntityTotal.get(skc, 0)
+        link_info = get_link_info(skc[:8])
 
         row = [
             skc[:8], skc, wh_color,
@@ -2493,7 +2529,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d['sizes'].get('S', 0), 0), round(d['sizes'].get('M', 0), 0),
             round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
-            d.get('delivery', ''), d.get('status', ''), d.get('factory', '')
+            d.get('delivery', ''), d.get('status', ''), d.get('factory', ''),
+            link_info
         ]
         ws1.append(row)
         rn = ws1.max_row
@@ -2510,14 +2547,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 20, 8]
+    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 20, 8, 25]
     for ci, w in enumerate(cw1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
     ws1.freeze_panes = 'A2'
     ws1.auto_filter.ref = f"A1:{get_column_letter(ws1.max_column)}{ws1.max_row}"
 
     # 绘制 Sheet1 右侧告示区
-    draw_legend_box(ws1, 24, [
+    draw_legend_box(ws1, 25, [
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
         ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
@@ -2529,7 +2566,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     headers2 = ['款号', 'SKC', '颜色',
                  '当前可销', '当前实体',
                  '前表可销', 'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
-                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后', '备注']
+                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后', '备注', '同链接主款/商品ID']
     ws2.append(headers2)
     for ci, h in enumerate(headers2, 1):
         cell = ws2.cell(1, ci)
@@ -2555,6 +2592,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         prev_sizes = d2['prev_sizes']
         entity     = whEntityTotal.get(skc, 0)
         remark     = d2.get('备注', '')
+        link_info  = get_link_info(skc[:8])
         row = [
             skc[:8], skc, d2['color'],
             round(d2['cur_total'], 0), round(entity, 0),
@@ -2569,6 +2607,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(cur_sizes.get('XL', 0), 0), round(cur_sizes.get('2XL', 0), 0),
             round(cur_sizes.get('均码', 0), 0),
             remark,
+            link_info,
         ]
         ws2.append(row)
         rn = ws2.max_row
@@ -2588,14 +2627,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 26]
+    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 26, 25]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
     ws2.auto_filter.ref = f"A1:{get_column_letter(ws2.max_column)}{ws2.max_row}"
 
     # 绘制 Sheet2 右侧告示区
-    draw_legend_box(ws2, 24, [
+    draw_legend_box(ws2, 25, [
         ('FFF2CC', '🟡 📦 开启商品同步', '最高优先级！需立即去 JEOMS / 千牛后台开启自动上传同步'),
         ('E2EFDA', '🟢 🌟 大货新品到仓(待上架)', '仓库已实际扫码入库的大货新品，准备安排商品上架'),
         ('DAEFCE', '🌿 🚀 自动铺货(新品预售)', '新品预售商品到仓回补'),
@@ -2605,7 +2644,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
     ws3 = wb.create_sheet('无翻单需评分')
     headers3 = ['款号', 'SKC', '仓库可销', '综合评分',
-                '7天访客', '7天支付', '7天加购', '翻单建议']
+                '7天访客', '7天支付', '7天加购', '翻单建议', '同链接主款/商品ID']
     ws3.append(headers3)
     for ci, h in enumerate(headers3, 1):
         cell = ws3.cell(1, ci)
@@ -2619,9 +2658,10 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         score  = sc.get('score')
         advice = sc.get('advice', '⚪ 无数据')
         fill_color = 'F4CCCC' if '❌' in advice else ('FFF2CC' if '⚠️' in advice else 'DAEFCE')
+        link_info = get_link_info(code)
         row = [code, skc, round(qty, 0),
                str(score) if score is not None else '无数据',
-               sc.get('visitors', 0), sc.get('pay', 0), sc.get('cart', 0), advice]
+               sc.get('visitors', 0), sc.get('pay', 0), sc.get('cart', 0), advice, link_info]
         ws3.append(row)
         rn = ws3.max_row
         for ci in range(1, len(headers3) + 1):
@@ -2630,7 +2670,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw3 = [10, 14, 10, 10, 10, 10, 10, 16]
+    cw3 = [10, 14, 10, 10, 10, 10, 10, 16, 25]
     for ci, w in enumerate(cw3, 1):
         ws3.column_dimensions[get_column_letter(ci)].width = w
     ws3.freeze_panes = 'A2'
@@ -2646,7 +2686,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     headers4 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次到货数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
-                 '预计到货日期', '生产状态', '工厂', '翻单数据源']
+                 '预计到货日期', '生产状态', '工厂', '翻单数据源', '同链接主款/商品ID']
     ws4.append(headers4)
     for ci, h in enumerate(headers4, 1):
         cell = ws4.cell(1, ci)
@@ -2659,6 +2699,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_total  = wh_neg_total.get(skc, 0)
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
+        link_info = get_link_info(skc[:8])
 
         row = [
             skc[:8], skc, wh_color,
@@ -2673,7 +2714,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
             d.get('delivery', ''), d.get('status', ''), d.get('factory', ''),
-            ('' if (d.get('is_master') or not d.get('is_omitted_from_master', False)) else d.get('source', ''))
+            ('' if (d.get('is_master') or not d.get('is_omitted_from_master', False)) else d.get('source', '')),
+            link_info
         ]
         ws4.append(row)
         rn = ws4.max_row
@@ -2685,14 +2727,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
+    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24, 25]
     for ci, w in enumerate(cw4, 1):
         ws4.column_dimensions[get_column_letter(ci)].width = w
     ws4.freeze_panes = 'A2'
     ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
     # 绘制 Sheet4 右侧客服专属告示区
-    draw_legend_box(ws4, 25, [
+    draw_legend_box(ws4, 26, [
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
