@@ -1437,7 +1437,10 @@ def analyze():
                             
                     key = (skc, actual_date)
                     if key not in all_restock:
-                        all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': ''}
+                        all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': '', 'is_master': True, 'source': ''}
+                    else:
+                        all_restock[key]['is_master'] = True
+                        all_restock[key]['source'] = ''
                         
                     # 提取各个尺码数量并准备重新分摊
                     row_sizes = {}
@@ -1613,7 +1616,10 @@ def analyze():
                         
                 key = (skc, actual_date)
                 if key not in all_restock:
-                    all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': ''}
+                    all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': '', 'is_master': True, 'source': ''}
+                else:
+                    all_restock[key]['is_master'] = True
+                    all_restock[key]['source'] = ''
                     
                 for sz, idx in nba_indexes['sizes'].items():
                     if idx is not None and len(rd) > idx:
@@ -1869,9 +1875,12 @@ def analyze():
 
         # Step 3d：写入去重后的翻单数据（各尺码数量直接赋值，不叠加——同一笔翻单取最晚货期后只保留一条）
         for (gk_k, skc_k, delivery_date), sizes in deduped_skc_date_sizes.items():
+            key = (skc_k, delivery_date)
+            # NOTE: 若大货总表已有该 (skc, 交期) 记录，生产总表权威最高，绝对不被散表覆盖！
+            if key in all_restock and all_restock[key].get('is_master'):
+                continue
             meta = skc_date_meta.get((gk_k, skc_k, delivery_date), {})
             is_missing = meta.get('is_missing_delivery', False)
-            key = (skc_k, delivery_date)
             # NOTE: 直接覆盖写入，不使用 +=，因为相同签名的多个货期版本已折叠为一条最晚货期记录
             sizes_filled = {k: 0 for k in SIZE_KEYS}
             for sz_k, qty_v in sizes.items():
@@ -1941,6 +1950,12 @@ def analyze():
     seen_omitted_skcs = set()
     
     for (skc, actual_date), d in all_restock.items():
+        # 如果条目本来就是大货总表导入的，已经是总表权威记录，无需审计
+        if d.get('is_master'):
+            d['is_omitted_from_master'] = False
+            d['source'] = ''
+            continue
+
         if not skc or not d.get('source'):
             continue
             
@@ -2007,6 +2022,10 @@ def analyze():
                 'factory': d.get('factory') or '',
                 'source': d.get('source') or ''
             })
+        else:
+            d['is_omitted_from_master'] = False
+            # 用户明确指示：以总表为准，如果总表中有出现的数据，不需要备注散表
+            d['source'] = ''
 
     # ── 4. 全局跨源去重与交期智能融合引擎（前置执行）─────────────────
     # 用户明确指示：
@@ -2033,13 +2052,17 @@ def analyze():
                 skc_val, act_dt, d_val = item_list[0]
                 d_copy = dict(d_val)
                 d_copy['delivery'] = act_dt.strftime('%Y-%m-%d') if not d_val.get('is_missing_delivery') else '交期未填/待定'
+                if d_copy.get('is_master') or not d_copy.get('is_omitted_from_master', False):
+                    # 总表中有出现的数据，不需要备注散表
+                    d_copy['source'] = ''
+                    d_copy['is_omitted_from_master'] = False
                 deduped.append((skc_val, act_dt, d_copy))
                 continue
 
             # 存在跨源重复条目：大货总表 vs 微信散单
             master_items = [
                 it for it in item_list
-                if any(kw in str(it[2].get('source', '')) for kw in ['SG品牌进度表', '专供订单进度', 'NBA', 'SG-2026'])
+                if it[2].get('is_master') or any(kw in str(it[2].get('source', '')) for kw in ['SG品牌进度表', '专供订单进度', 'NBA', 'SG-2026'])
                    or not it[2].get('is_omitted_from_master', False)
             ]
 
@@ -2094,7 +2117,12 @@ def analyze():
             merged_d['delivery'] = final_delivery_str
             merged_d['status'] = detailed_status
             merged_d['factory'] = final_factory
-            merged_d['source'] = ' + '.join(sources) if sources else best_entry[2].get('source', '')
+            if master_items or any(it[2].get('is_master') or not it[2].get('is_omitted_from_master', False) for it in item_list):
+                # 包含大货总表或已在总表登记：以总表为准，不需要备注散表！
+                merged_d['source'] = ''
+                merged_d['is_omitted_from_master'] = False
+            else:
+                merged_d['source'] = ' + '.join(sources) if sources else best_entry[2].get('source', '')
 
             # 5. 若包含大货总表，标记已登记
             if master_items:
@@ -2145,6 +2173,9 @@ def analyze():
                     d_cust['status'] = f"⚠️大货总表未更新待登记({tag_str})"
                 else:
                     d_cust['status'] = f"⚠️大货表待登({tag_str})"
+            else:
+                # 确保总表中已出现的数据绝不备注散表
+                d_cust['source'] = ''
             customer_results.append((skc, actual_date, d_cust))
 
         # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在统一窗口期内）
@@ -2615,7 +2646,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d['sizes'].get('S', 0), 0), round(d['sizes'].get('M', 0), 0),
             round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
-            d.get('delivery', ''), d.get('status', ''), d.get('factory', ''), d.get('source', '')
+            d.get('delivery', ''), d.get('status', ''), d.get('factory', ''),
+            ('' if (d.get('is_master') or not d.get('is_omitted_from_master', False)) else d.get('source', ''))
         ]
         ws4.append(row)
         rn = ws4.max_row
