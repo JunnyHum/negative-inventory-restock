@@ -392,6 +392,8 @@ def load_product_table(filepath):
     try:
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
         result = {}
+        item_id_to_main_code = {}  # {item_id: (mainCode, prod_obj)} 用于同链接多款号（如秋装加棉）跨表智能关联
+        
         for sh in wb.sheetnames:
             ws = wb[sh]
             rows = list(ws.iter_rows(values_only=True))
@@ -403,6 +405,7 @@ def load_product_table(filepath):
             code_col = None
             date_col = None
             status_col = None
+            item_id_col = None
             
             for r_i, r in enumerate(rows[:10]):
                 if not r: continue
@@ -414,6 +417,8 @@ def load_product_table(filepath):
                         date_col = c_i
                     elif val in ['商品状态', '状态', '在售状态']:
                         status_col = c_i
+                    elif val in ['商品ID', '商品id', '宝贝ID', '宝贝id', 'itemId']:
+                        item_id_col = c_i
                 if code_col is not None:
                     header_idx = r_i
                     break
@@ -421,8 +426,9 @@ def load_product_table(filepath):
             if code_col is None:
                 continue
                 
-            # 第一轮（Pass 1）：先完整提取所有具备独立商品编码的主款号记录
+            # 第一轮（Pass 1）：提取主款号与建立商品ID链接映射
             rows_data = []
+            is_main_sheet = (sh in ['服饰正价', '箱包正价'])
             for row in rows[header_idx + 1:]:
                 if not row or len(row) <= code_col:
                     continue
@@ -432,19 +438,23 @@ def load_product_table(filepath):
                 
                 listDate = row[date_col] if (date_col is not None and len(row) > date_col) else None
                 statusVal = str(row[status_col]).strip() if (status_col is not None and len(row) > status_col and row[status_col]) else ''
+                item_id = str(row[item_id_col]).strip() if (item_id_col is not None and len(row) > item_id_col and row[item_id_col]) else ''
                 
                 prod_obj = {
                     '上架日期': listDate,
                     '商品状态': statusVal,
-                    'isPrimary': True
+                    'isPrimary': is_main_sheet
                 }
+                if is_main_sheet and item_id:
+                    item_id_to_main_code[item_id] = (productCode, prod_obj)
+
                 if productCode not in result or (listDate and not result[productCode].get('上架日期')):
                     result[productCode] = prod_obj
-                rows_data.append((productCode, row, prod_obj))
+                rows_data.append((productCode, item_id, row, prod_obj))
 
-            # 第二轮（Pass 2：防呆校验）：解析备注/整行中的副款号，若副款号已有独立商品主记录则强制拦截拒绝覆盖
+            # 第二轮（Pass 2：防呆校验）：解析服饰正价等主表备注/整行中的副款号（如加棉款号）
             primary_codes = set(result.keys())
-            for mainCode, row, prod_obj in rows_data:
+            for mainCode, item_id, row, prod_obj in rows_data:
                 row_text = ' '.join(str(c) for c in row if c is not None)
                 extra_codes = set(re.findall(r'\b[A-Z]{2}\d{6}\b', row_text))
                 for extra_c in extra_codes:
@@ -458,6 +468,22 @@ def load_product_table(filepath):
                         sub_obj['isPrimary'] = False
                         sub_obj['mainCode'] = mainCode
                         result[extra_c] = sub_obj
+
+            # 第三轮（Pass 3：区间价格/同链接多款号自愈关联）：
+            # 用户指示：同一个链接可能有不同款号（如秋装加棉），可以在区间价商品中按商品ID关联对应主链接
+            if '区间' in sh:
+                for productCode, item_id, row, prod_obj in rows_data:
+                    if item_id and item_id in item_id_to_main_code:
+                        main_c, main_prod = item_id_to_main_code[item_id]
+                        if productCode != main_c and productCode not in primary_codes:
+                            if productCode not in result:
+                                sub_obj = dict(main_prod)
+                                sub_obj['isPrimary'] = False
+                                sub_obj['mainCode'] = main_c
+                                sub_obj['isIntervalPadded'] = True
+                                result[productCode] = sub_obj
+                            else:
+                                result[productCode]['mainCode'] = main_c
 
         wb.close()
         
