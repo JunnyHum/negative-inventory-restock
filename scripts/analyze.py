@@ -1136,10 +1136,11 @@ def analyze():
         except ValueError:
             pass
 
-    # 动态窗口期：今天前10天 ~ 今天后15天
+    # 动态窗口期：今天前10天 ~ 今天后20天（用户明确指示：Sheet 1 窗口期与客服表完全统一保持一致）
     window_start = today - timedelta(days=10)
-    window_end   = today + timedelta(days=15)
-    logger.info("窗口期: %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
+    window_end   = today + timedelta(days=20)
+    customer_window_end = window_end
+    logger.info("窗口期(Sheet 1与客服表统一): %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
 
     def is_older_than_last_week(source_name, base_date=today):
         """
@@ -1985,121 +1986,58 @@ def analyze():
                 'source': d.get('source') or ''
             })
 
-    # ── 4. 窗口期过滤 ─────────────────────────────────────────────────
-    results = []
-    customer_results = []
-    customer_window_end = today + timedelta(days=20)
-    logger.info("客服专用到货参考窗口期: %s ~ %s", window_start.strftime('%m/%d'), customer_window_end.strftime('%m/%d'))
-
-    for (skc, actual_date), d in all_restock.items():
-        total = sum(d['sizes'].values())
-        if total <= 0: continue
-        if actual_date is None: continue
-        if not isinstance(actual_date, datetime):
-            try:
-                actual_date = datetime.strptime(str(actual_date), '%Y-%m-%d')
-            except (ValueError, TypeError):
-                continue
-
-        src = d.get('source') or ''
-        # 核心判定重构：根据生产部大货总表本周是否更新，自适应决定散单的纳管规则
-        # 若总表【已更新】：早于本周一发出的历史散表且总表中查无记录，认定为因改动未实际下单，踢出 Sheet 1/4
-        # 若总表【未更新】（如周一生产部未上传新总表）：上周发出的散表（如 0824唐、0826唐、0826桥）绝对不判为取消，全量保留纳入窗口期到货与客服表！
-        if is_master_updated:
-            is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_last_week(src, base_date=today))
-        else:
-            is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_two_weeks(src, base_date=today))
-
-        # 提前解析散表文件名日期与负责人前缀标签
-        owner = d.get('status') or ''
-        bname = os.path.basename(src) if src else ''
-        m_date = re.search(r'(\d{2})[-_.]?(\d{2})', bname) if bname else None
-        date_tag = f"{m_date.group(1)}{m_date.group(2)}" if m_date else ""
-        label_parts = []
-        if date_tag:
-            label_parts.append(date_tag)
-        if owner and owner not in label_parts:
-            label_parts.append(owner)
-        elif not owner:
-            for cand in ['唐', '桥', '天猫']:
-                if cand in bname and cand not in label_parts:
-                    label_parts.append(cand)
-                    break
-        tag_str = "".join(label_parts) if label_parts else "散表"
-
-        # 客服专用参考：只要在窗口期内（window_start <= actual_date <= customer_window_end），即便是出清条目也记录到客服专用 Sheet
-        if not is_unconfirmed_old and window_start <= actual_date <= customer_window_end:
-            d_cust = dict(d)
-            if d.get('is_missing_delivery'):
-                d_cust['delivery'] = '交期未填/待定'
-            else:
-                d_cust['delivery'] = actual_date.strftime('%Y-%m-%d')
-            d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
-            
-            # 客服专用表状态高亮打标
-            if d.get('is_omitted_from_master', False):
-                if not is_master_updated:
-                    d_cust['status'] = f"⚠️大货总表未更新待登记({tag_str})"
-                else:
-                    d_cust['status'] = f"⚠️大货表待登({tag_str})"
-            customer_results.append((skc, actual_date, d_cust))
-
-        # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在标准 window_end 内）
-        if d.get('is_cleared', False): continue
-        if is_unconfirmed_old: continue
-        if skc not in neg_skcs: continue
-        pc_code = skc[:8]
-        if pc_code not in product_table: continue
-        if window_start <= actual_date <= window_end:
-            d2 = dict(d)
-            if d.get('is_missing_delivery'):
-                d2['delivery'] = '交期未填/待定'
-            else:
-                d2['delivery'] = actual_date.strftime('%Y-%m-%d')
-            d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
-            
-            # 对大货表缺失项在 Sheet 1 生产状态打上显式高亮标记
-            if d.get('is_omitted_from_master', False):
-                if not is_master_updated:
-                    d2['status'] = f"⚠️大货总表未更新待登记({tag_str})"
-                else:
-                    d2['status'] = f"⚠️大货表待登({tag_str})"
-                
-            d2['isApprox'] = False
-            results.append((skc, actual_date, d2))
-
-    # ── 通用跨源尺码签名去重与交期智能融合引擎 ───────────────────────
-    def dedup_and_merge_entries(entry_list, is_customer_sheet=False):
-        """
-        全局跨源尺码签名去重与交期融合引擎
-        同一 SKC 下各尺码数量完全一致（sz_signature 相同）视为同一笔翻单：
-        1. 交期裁决：剔除'交期未填/待定'，优先选取有具体交期的版本；若有多个具体交期，以最新校准（最晚有效交期）为准。
-        2. 生产状态融合：优先保留包含具体生产进度描述（如'在绣花'、'没面料'、'正在印花中'、'待登'等）的状态。
-        3. 工厂融合：优先选取有效非空工厂名（排除 #N/A 和空）。
-        4. 数据源融合：若为客服表，合并多源文件名（如 微信散表 + 大货表）。
-        """
+    # ── 4. 全局跨源去重与交期智能融合引擎（前置执行）─────────────────
+    # 用户明确指示：
+    # 1. 散单与大货总表去重融合必须在窗口期过滤前执行，以大货总表权威定调（如 WE133305 的 09-25），
+    #    彻底覆盖淘汰散单旧草案交期（09-18），避免散单旧交期死灰复燃；
+    # 2. Sheet 1 窗口期与客服表完全保持一致（均为 today + 20天）。
+    def merge_all_restock_entries(restock_dict):
         groups = defaultdict(list)
-        for skc, act_dt, d in entry_list:
+        for (skc, actual_date), d in restock_dict.items():
+            total = sum(d['sizes'].values())
+            if total <= 0: continue
+            if actual_date is None: continue
+            if not isinstance(actual_date, datetime):
+                try:
+                    actual_date = datetime.strptime(str(actual_date), '%Y-%m-%d')
+                except (ValueError, TypeError):
+                    continue
             sz_tuple = tuple(round(float(d.get('sizes', {}).get(k, 0) or 0), 0) for k in SIZE_KEYS)
-            groups[(skc, sz_tuple)].append((skc, act_dt, d))
+            groups[(skc, sz_tuple)].append((skc, actual_date, d))
 
         deduped = []
         for (skc, sz_tuple), item_list in groups.items():
             if len(item_list) == 1:
-                deduped.append(item_list[0])
+                skc_val, act_dt, d_val = item_list[0]
+                d_copy = dict(d_val)
+                d_copy['delivery'] = act_dt.strftime('%Y-%m-%d') if not d_val.get('is_missing_delivery') else '交期未填/待定'
+                deduped.append((skc_val, act_dt, d_copy))
                 continue
 
-            # 存在重复项，执行智能裁决与融合
-            # 1. 优先提取明确具体交期（过滤未填/待定/None）
+            # 存在跨源重复条目：大货总表 vs 微信散单
+            master_items = [
+                it for it in item_list
+                if any(kw in str(it[2].get('source', '')) for kw in ['SG品牌进度表', '专供订单进度', 'NBA', 'SG-2026'])
+                   or not it[2].get('is_omitted_from_master', False)
+            ]
+
+            # 1. 交期裁决：如果有大货总表记录，100% 优先以大货总表的权威交期为准！
             valid_items = []
-            for it in item_list:
+            target_pool = master_items if master_items else item_list
+            for it in target_pool:
                 it_dt = it[1]
                 it_deliv_str = str(it[2].get('delivery', ''))
                 if it_dt is not None and '待定' not in it_deliv_str and '未填' not in it_deliv_str and it_deliv_str != 'None':
                     valid_items.append((it_dt, it))
 
+            if not valid_items:
+                for it in item_list:
+                    it_dt = it[1]
+                    it_deliv_str = str(it[2].get('delivery', ''))
+                    if it_dt is not None and '待定' not in it_deliv_str and '未填' not in it_deliv_str and it_deliv_str != 'None':
+                        valid_items.append((it_dt, it))
+
             if valid_items:
-                # 按具体交期取最晚（即最新校准的货期）的记录作为主模板
                 valid_items.sort(key=lambda x: x[0])
                 best_dt, best_entry = valid_items[-1]
                 final_dt = best_dt
@@ -2119,32 +2057,90 @@ def analyze():
             if not detailed_status and statuses:
                 detailed_status = str(statuses[-1])
 
-            # 3. 工厂融合：优先选取有效工厂名称（排除 #N/A、None、- 等无效占位）
+            # 3. 工厂融合：优先大货总表工厂或有效非空工厂
             factories = [it[2].get('factory', '') for it in item_list if it[2].get('factory') and str(it[2].get('factory')).strip() not in ['#N/A', 'None', '', '-', 'None']]
             final_factory = str(factories[-1]) if factories else str(best_entry[2].get('factory') or '')
+
+            # 4. 数据源合并
+            sources = []
+            for it in item_list:
+                src = it[2].get('source', '')
+                if src and src not in sources:
+                    sources.append(src)
 
             merged_d = dict(best_entry[2])
             merged_d['delivery'] = final_delivery_str
             merged_d['status'] = detailed_status
             merged_d['factory'] = final_factory
+            merged_d['source'] = ' + '.join(sources) if sources else best_entry[2].get('source', '')
 
-            # 4. 数据源融合（主要用于客服专用表）
-            if is_customer_sheet:
-                sources = []
-                for it in item_list:
-                    src = it[2].get('source', '')
-                    if src and src not in sources:
-                        sources.append(src)
-                if sources:
-                    merged_d['source'] = ' + '.join(sources)
+            # 5. 若包含大货总表，标记已登记
+            if master_items:
+                merged_d['is_omitted_from_master'] = False
+            if any(it[2].get('is_cleared', False) for it in item_list):
+                merged_d['is_cleared'] = True
 
             deduped.append((skc, final_dt, merged_d))
 
         return deduped
 
-    # ── 对 Sheet 1 (窗口期到货) 与 Sheet 4 (客服专用参考) 执行去重融合 ──
-    results = dedup_and_merge_entries(results, is_customer_sheet=False)
-    customer_results = dedup_and_merge_entries(customer_results, is_customer_sheet=True)
+    # 执行全局跨源前置去重融合
+    deduped_entries = merge_all_restock_entries(all_restock)
+
+    results = []
+    customer_results = []
+    logger.info("统一窗口期范围 (Sheet 1 与 客服表保持一致): %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
+
+    for skc, actual_date, d in deduped_entries:
+        src = d.get('source') or ''
+        if is_master_updated:
+            is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_last_week(src, base_date=today))
+        else:
+            is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_two_weeks(src, base_date=today))
+
+        owner = d.get('status') or ''
+        bname = os.path.basename(src) if src else ''
+        m_date = re.search(r'(\d{2})[-_.]?(\d{2})', bname) if bname else None
+        date_tag = f"{m_date.group(1)}{m_date.group(2)}" if m_date else ""
+        label_parts = []
+        if date_tag:
+            label_parts.append(date_tag)
+        if owner and owner not in label_parts:
+            label_parts.append(owner)
+        elif not owner:
+            for cand in ['唐', '桥', '天猫']:
+                if cand in bname and cand not in label_parts:
+                    label_parts.append(cand)
+                    break
+        tag_str = "".join(label_parts) if label_parts else "散表"
+
+        # 客服专用参考：只要在统一窗口期内
+        if not is_unconfirmed_old and window_start <= actual_date <= window_end:
+            d_cust = dict(d)
+            d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
+            if d.get('is_omitted_from_master', False):
+                if not is_master_updated:
+                    d_cust['status'] = f"⚠️大货总表未更新待登记({tag_str})"
+                else:
+                    d_cust['status'] = f"⚠️大货表待登({tag_str})"
+            customer_results.append((skc, actual_date, d_cust))
+
+        # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在统一窗口期内）
+        if d.get('is_cleared', False): continue
+        if is_unconfirmed_old: continue
+        if skc not in neg_skcs: continue
+        pc_code = skc[:8]
+        if pc_code not in product_table: continue
+        if window_start <= actual_date <= window_end:
+            d2 = dict(d)
+            d2['color'] = wh_colors_txt.get(skc, d.get('color', ''))
+            if d.get('is_omitted_from_master', False):
+                if not is_master_updated:
+                    d2['status'] = f"⚠️大货总表未更新待登记({tag_str})"
+                else:
+                    d2['status'] = f"⚠️大货表待登({tag_str})"
+            d2['isApprox'] = False
+            results.append((skc, actual_date, d2))
 
     # 客服专用参考按 (款号, 到货日期, SKC) 排序
     customer_results.sort(key=lambda x: (x[0][:8], x[2].get('delivery', ''), x[0]))
