@@ -59,9 +59,7 @@ SIZE_LAST_MAP = {'3': 'XS', '4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL',
 EXCLUDED_UNOFFICIAL_CODES = {'WD920217'}
 
 # 人工指定的款式到货交期校准字典（针对散表中遗留历史日期或业务最新改期调整）
-MANUAL_DELIVERY_OVERRIDES = {
-    'WE133321': datetime(2026, 9, 2),
-}
+MANUAL_DELIVERY_OVERRIDES = {}
 
 def toInt(v) -> int:
     """将单元格值安全转换为整数"""
@@ -160,59 +158,60 @@ def excel_serial_to_date(serial):
         return None
 
 def get_date_value(val):
-    # 支持 M/D-M/D (如 "6/6-6/8") 和 M/D (如 "6/8")
-    if isinstance(val, str):
-        s = val.strip()
-        # M/D-M/D 格式 (如 "6/6-6/8")
-        m1 = re.match(r'^(\d+)/(\d+)-(\d+)/(\d+)$', s)
-        if m1:
-            month2 = int(m1.group(3))
-            day2 = int(m1.group(4))
-            year = inferYear(month2)
-            return datetime(year, month2, day2)  # 取最后一天
-        # M/D-D 格式 (如 "4/15-16"，同月)
-        m = re.match(r'^(\d+)/(\d+)-(\d+)$', s)
-        if m:
-            month = int(m.group(1))
-            year = inferYear(month)
-            return datetime(year, month, int(m.group(3)))  # 取最后一天
-        # M.D-M.D 格式 (如 "3.31-4.10"，跨月带点)
-        m = re.match(r'^(\d+)\.(\d+)-(\d+)\.(\d+)$', s)
-        if m:
-            month2 = int(m.group(3))
-            day2 = int(m.group(4))
-            year = inferYear(month2)
-            return datetime(year, month2, day2)  # 取最后一天
-        # 单日 M/D 格式 (如 "6/8")
-        m = re.match(r'^(\d+)/(\d+)$', s)
-        if m:
-            month = int(m.group(1))
-            year = inferYear(month)
-            return datetime(year, month, int(m.group(2)))
-        # 尝试标准年-月-日或月-日等格式解析
-        for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%m-%d', '%m/%d']:
-            try:
-                dt_val = datetime.strptime(s, fmt)
-                if fmt in ['%m-%d', '%m/%d']:
-                    dt_val = dt_val.replace(year=inferYear(dt_val.month))
-                return dt_val
-            except ValueError:
-                pass
-        return None
-
     if val is None: return None
-    if isinstance(val, datetime): return val
+    if isinstance(val, datetime):
+        return val if val.year >= 2024 else None
     if isinstance(val, (int, float)):
-        return excel_serial_to_date(val)
+        res = excel_serial_to_date(val)
+        return res if res and res.year >= 2024 else None
+
     s = str(val).strip()
-    if not s or s in ['-', 'None', '']: return None
-    # 对于已经是标准的年-月-日字符串，直接尝试解析
+    if not s or s in ['-', 'None', '', 'nan', 'NaT']: return None
+
+    # 支持 Excel 纯数字序列号字符串 (如 "46270", "46285.0")
+    if re.match(r'^\d{5}(\.0+)?$', s):
+        try:
+            res = excel_serial_to_date(float(s))
+            if res and res.year >= 2024:
+                return res
+        except:
+            pass
+
+    # 支持 M/D-M/D (如 "6/6-6/8") 和 M/D (如 "6/8")
+    # M/D-M/D 格式 (如 "6/6-6/8")
+    m1 = re.match(r'^(\d+)/(\d+)-(\d+)/(\d+)$', s)
+    if m1:
+        month2 = int(m1.group(3))
+        day2 = int(m1.group(4))
+        year = inferYear(month2)
+        return datetime(year, month2, day2)  # 取最后一天
+    # M/D-D 格式 (如 "4/15-16"，同月)
+    m = re.match(r'^(\d+)/(\d+)-(\d+)$', s)
+    if m:
+        month = int(m.group(1))
+        year = inferYear(month)
+        return datetime(year, month, int(m.group(3)))  # 取最后一天
+    # M.D-M.D 格式 (如 "3.31-4.10"，跨月带点)
+    m = re.match(r'^(\d+)\.(\d+)-(\d+)\.(\d+)$', s)
+    if m:
+        month2 = int(m.group(3))
+        day2 = int(m.group(4))
+        year = inferYear(month2)
+        return datetime(year, month2, day2)  # 取最后一天
+    # 单日 M/D 格式 (如 "6/8")
+    m = re.match(r'^(\d+)/(\d+)$', s)
+    if m:
+        month = int(m.group(1))
+        year = inferYear(month)
+        return datetime(year, month, int(m.group(2)))
+    # 尝试标准年-月-日或月-日等格式解析
     for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%m-%d', '%m/%d']:
         try:
             dt_val = datetime.strptime(s, fmt)
             if fmt in ['%m-%d', '%m/%d']:
                 dt_val = dt_val.replace(year=inferYear(dt_val.month))
-            return dt_val
+            if dt_val.year >= 2024:
+                return dt_val
         except ValueError:
             pass
     return None
@@ -1061,6 +1060,7 @@ def parse_individual_restock_file(filepath):
                 skc = pc + cc
                 records.append({
                     'skc': skc,
+                    'color': color,
                     'size': size_name,
                     'qty': qty_val,
                     'delivery': delivery_date,
@@ -1197,6 +1197,11 @@ def analyze():
         mc = re.search(r'\[(\d+)\]', color_str_str)
         if mc:
             return mc.group(1)
+
+        # 兼容尾缀两位数字色号 (如 "黑色79", "深灰24", "藏青48", "花灰24")
+        m_end = re.search(r'(?:0[1-9]|[1-9]\d)$', color_str_str)
+        if m_end:
+            return m_end.group(0)
             
         if spec_raw:
             spec_str = str(spec_raw).strip()
@@ -1204,6 +1209,7 @@ def analyze():
                 return spec_str[8:10]
                 
         color_clean = re.sub(r'\[\d+\]', '', color_str_str).strip()
+        color_clean = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean).strip()
         if pc and color_clean and wh_color_map:
             if (pc, color_clean) in wh_color_map:
                 return wh_color_map[(pc, color_clean)]
@@ -1352,6 +1358,10 @@ def analyze():
                 mc_raw = re.search(r'\[(\d+)\]', color_raw)
                 cc_raw = mc_raw.group(1) if mc_raw else None
                 if not cc_raw:
+                    m_end_raw = re.search(r'(?:0[1-9]|[1-9]\d)$', color_raw.strip())
+                    if m_end_raw:
+                        cc_raw = m_end_raw.group(0)
+                if not cc_raw:
                     spec_idx_sg = sg_indexes.get('spec')
                     if spec_idx_sg is not None and len(rd_raw) > spec_idx_sg:
                         spec_raw_sg = str(rd_raw[spec_idx_sg]).strip() if rd_raw[spec_idx_sg] else ''
@@ -1400,6 +1410,7 @@ def analyze():
                                 pass
                                 
                     color_clean = re.sub(r'\[\d+\]', '', color_raw).strip()
+                    color_clean = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean).strip()
                     # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
                     if not is_shipped_clean:
                         if cc_raw:
@@ -1527,6 +1538,10 @@ def analyze():
                 mc_raw2 = re.search(r'\[(\d+)\]', color_raw2)
                 cc_raw2 = mc_raw2.group(1) if mc_raw2 else None
                 if not cc_raw2:
+                    m_end_raw2 = re.search(r'(?:0[1-9]|[1-9]\d)$', color_raw2.strip())
+                    if m_end_raw2:
+                        cc_raw2 = m_end_raw2.group(0)
+                if not cc_raw2:
                     spec_idx_nba = nba_indexes.get('spec')
                     if spec_idx_nba is not None and len(rd) > spec_idx_nba:
                         spec_raw_nba = str(rd[spec_idx_nba]).strip() if rd[spec_idx_nba] else ''
@@ -1571,6 +1586,7 @@ def analyze():
                             pass
                             
                 color_clean2 = re.sub(r'\[\d+\]', '', color_raw2).strip()
+                color_clean2 = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean2).strip()
                 # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
                 if not is_shipped_clean:
                     if cc_raw2:
@@ -1807,6 +1823,7 @@ def analyze():
                     gk_key = (gk, skc, sz, delivery_date)
                     gk_sku_restock[gk_key] = {
                         'qty': r['qty'],
+                        'color': r.get('color', ''),
                         'status': str(r['status'])[:30] if r['status'] else '',
                         'factory': str(r['factory']) if r['factory'] else '',
                         'is_missing_delivery': is_missing_delivery,
@@ -1862,7 +1879,7 @@ def analyze():
                     sizes_filled[sz_k] = qty_v
             all_restock[key] = {
                 'sizes': sizes_filled,
-                'color': '',
+                'color': meta.get('color', '') or wh_colors_txt.get(skc_k, ''),
                 'status': meta.get('status', ''),
                 'factory': meta.get('factory', ''),
                 'is_missing_delivery': is_missing,
@@ -1930,7 +1947,10 @@ def analyze():
         pc = skc[:8]
         cc = skc[8:10] if len(skc) >= 10 and skc[8:10].isdigit() else None
         color_txt = str(d.get('color', '')).strip()
+        if not color_txt and skc in wh_colors_txt:
+            color_txt = wh_colors_txt[skc]
         color_clean = re.sub(r'\[\d+\]', '', color_txt).strip()
+        color_clean = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean).strip()
         w_qty = sum(d['sizes'].values())
         if w_qty <= 0:
             continue
@@ -1943,22 +1963,24 @@ def analyze():
             # 1. 款匹配
             if m['code'] != pc:
                 continue
-            # 2. 色匹配
+            # 2. 色匹配 (色号相同 / 纯色名相同 / 颜色名子串包含兼容)
             c_match = False
             if cc and m['cc'] == cc:
                 c_match = True
             elif color_clean and m['color'] == color_clean:
+                c_match = True
+            elif color_clean and m['color'] and (color_clean in m['color'] or m['color'] in color_clean):
                 c_match = True
             if not c_match:
                 continue
             # 3. 排除已显式标记清完结清的历史旧批次
             if m['is_cleared']:
                 continue
-            # 4. 到货日期/货期匹配 (交期相差 25 天以内或其中一个为空)
+            # 4. 到货日期/货期匹配 (交期相差 30 天以内或其中一个为空)
             d_match = True
             m_deliv_date = m['date'].date() if isinstance(m['date'], datetime) else (m['date'] if isinstance(m['date'], date) else None)
             if w_deliv_date and m_deliv_date:
-                if abs((w_deliv_date - m_deliv_date).days) > 25:
+                if abs((w_deliv_date - m_deliv_date).days) > 30:
                     d_match = False
             if not d_match:
                 continue
@@ -2247,8 +2269,8 @@ def analyze():
             src = item.get('source', '')
             is_old = is_older_than_last_week(src, base_date=today)
             if is_old:
-                err_type = '⚠️ 疑似临时改动/未下单'
-                sugg = f"该翻单来源于上周或更早散表（{src}），但在当周生产大货总表中查无登记，疑似临时改动且未实际向工厂下单，请核对是否已取消"
+                err_type = '⚠️ 总表未登记(需核对: 生产部漏登或已撤销)'
+                sugg = f"该翻单来源于上周散表（{src}），但在生产大货总表中查无登记。需与生产部核对确认：若已下单请生产部及时补录总表；若该翻单实际已撤销，可忽略"
             else:
                 err_type = '⚠️ 本周新单待总表登记'
                 sugg = f"本周微信散表（{src}）最新下单，当周生产大货总表尚未同步录入，请生产部及时补登"
