@@ -2700,7 +2700,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     headers4 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次到货数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
-                 '预计到货日期', '生产状态', '工厂', '翻单数据源', '同链接主款', '商品链接']
+                 '预计到货日期', '生产状态', '工厂', '翻单数据源']
     ws4.append(headers4)
     for ci, h in enumerate(headers4, 1):
         cell = ws4.cell(1, ci)
@@ -2713,7 +2713,6 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_total  = wh_neg_total.get(skc, 0)
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
-        main_code, link_url = get_link_details(skc[:8])
 
         row = [
             skc[:8], skc, wh_color,
@@ -2728,9 +2727,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d['sizes'].get('L', 0), 0), round(d['sizes'].get('XL', 0), 0),
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
             d.get('delivery', ''), d.get('status', ''), d.get('factory', ''),
-            ('' if (d.get('is_master') or not d.get('is_omitted_from_master', False)) else d.get('source', '')),
-            main_code,
-            link_url
+            ('' if (d.get('is_master') or not d.get('is_omitted_from_master', False)) else d.get('source', ''))
         ]
         ws4.append(row)
         rn = ws4.max_row
@@ -2741,18 +2738,15 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
-            if ci == len(headers4) and link_url:
-                cell.hyperlink = link_url
-                cell.font = Font(color='0563C1', underline='single', size=9)
 
-    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24, 14, 45]
+    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
     for ci, w in enumerate(cw4, 1):
         ws4.column_dimensions[get_column_letter(ci)].width = w
     ws4.freeze_panes = 'A2'
     ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
     # 绘制 Sheet4 右侧客服专属告示区
-    draw_legend_box(ws4, 27, [
+    draw_legend_box(ws4, 25, [
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
