@@ -2481,7 +2481,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
 
     def get_link_details(code):
         """
-        若为同链接衍生款/加棉款，返回 (主款号, 淘系商品链接)；
+        若为同链接衍生款/加棉款，返回 (主款号, 商品ID)；
         若为主款或独立款，返回 ('', '')。
         """
         if not product_table or code not in product_table:
@@ -2494,8 +2494,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
                 item_id = ''
             elif item_id.endswith('.0'):
                 item_id = item_id[:-2]
-            link_url = f"https://item.taobao.com/item.htm?id={item_id}" if item_id else ''
-            return main_c, link_url
+            return main_c, item_id
         return '', ''
 
     # ── Sheet1: 窗口期到货 ───────────────────────────────────────────
@@ -2504,7 +2503,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     headers1 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
-                 '到货日期', '生产状态', '工厂', '同链接主款', '商品链接']
+                 '到货日期', '生产状态', '工厂', '同链接主款', '商品ID']
     ws1.append(headers1)
     for ci, h in enumerate(headers1, 1):
         cell = ws1.cell(1, ci)
@@ -2518,7 +2517,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
         entity   = whEntityTotal.get(skc, 0)
-        main_code, link_url = get_link_details(skc[:8])
+        main_code, item_id = get_link_details(skc[:8])
 
         row = [
             skc[:8], skc, wh_color,
@@ -2534,7 +2533,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d['sizes'].get('2XL', 0), 0), round(d['sizes'].get('均码', 0), 0),
             d.get('delivery', ''), d.get('status', ''), d.get('factory', ''),
             main_code,
-            link_url
+            item_id
         ]
         ws1.append(row)
         rn = ws1.max_row
@@ -2550,11 +2549,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
-            if ci == len(headers1) and link_url:
-                cell.hyperlink = link_url
-                cell.font = Font(color='0563C1', underline='single', size=9)
 
-    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 20, 8, 14, 45]
+    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 20, 8, 14, 16]
     for ci, w in enumerate(cw1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
     ws1.freeze_panes = 'A2'
@@ -2573,7 +2569,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     headers2 = ['款号', 'SKC', '颜色',
                  '当前可销', '当前实体',
                  '前表可销', 'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
-                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后', '备注', '同链接主款', '商品链接']
+                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后', '备注', '同链接主款', '商品ID']
     ws2.append(headers2)
     for ci, h in enumerate(headers2, 1):
         cell = ws2.cell(1, ci)
@@ -2599,7 +2595,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         prev_sizes = d2['prev_sizes']
         entity     = whEntityTotal.get(skc, 0)
         remark     = d2.get('备注', '')
-        main_code, link_url = get_link_details(skc[:8])
+        main_code, item_id = get_link_details(skc[:8])
         row = [
             skc[:8], skc, d2['color'],
             round(d2['cur_total'], 0), round(entity, 0),
@@ -2615,7 +2611,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(cur_sizes.get('均码', 0), 0),
             remark,
             main_code,
-            link_url,
+            item_id,
         ]
         ws2.append(row)
         rn = ws2.max_row
@@ -2634,11 +2630,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
-            if ci == len(headers2) and link_url:
-                cell.hyperlink = link_url
-                cell.font = Font(color='0563C1', underline='single', size=9)
 
-    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 26, 14, 45]
+    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 26, 14, 16]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
@@ -2655,7 +2648,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
     ws3 = wb.create_sheet('无翻单需评分')
     headers3 = ['款号', 'SKC', '仓库可销', '综合评分',
-                '7天访客', '7天支付', '7天加购', '翻单建议', '同链接主款', '商品链接']
+                '7天访客', '7天支付', '7天加购', '翻单建议', '同链接主款', '商品ID']
     ws3.append(headers3)
     for ci, h in enumerate(headers3, 1):
         cell = ws3.cell(1, ci)
@@ -2669,10 +2662,10 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         score  = sc.get('score')
         advice = sc.get('advice', '⚪ 无数据')
         fill_color = 'F4CCCC' if '❌' in advice else ('FFF2CC' if '⚠️' in advice else 'DAEFCE')
-        main_code, link_url = get_link_details(code)
+        main_code, item_id = get_link_details(code)
         row = [code, skc, round(qty, 0),
                str(score) if score is not None else '无数据',
-               sc.get('visitors', 0), sc.get('pay', 0), sc.get('cart', 0), advice, main_code, link_url]
+               sc.get('visitors', 0), sc.get('pay', 0), sc.get('cart', 0), advice, main_code, item_id]
         ws3.append(row)
         rn = ws3.max_row
         for ci in range(1, len(headers3) + 1):
@@ -2680,11 +2673,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
-            if ci == len(headers3) and link_url:
-                cell.hyperlink = link_url
-                cell.font = Font(color='0563C1', underline='single', size=9)
 
-    cw3 = [10, 14, 10, 10, 10, 10, 10, 16, 14, 45]
+    cw3 = [10, 14, 10, 10, 10, 10, 10, 16, 14, 16]
     for ci, w in enumerate(cw3, 1):
         ws3.column_dimensions[get_column_letter(ci)].width = w
     ws3.freeze_panes = 'A2'
