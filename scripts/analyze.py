@@ -504,6 +504,7 @@ def load_product_table(filepath):
         product_code_aliases = {
             'NE230332': 'NE230316',  # 与NE230316同链接合并上架
             'WE040303': 'WE040302',  # 与WE040302同链接合并上架（303半高领 / 302圆领）
+            'WE043304': 'WE033303',  # 与WE033303同链接合并上架（加绒款WE043304 / 主款WE033303）
         }
         for alias_c, main_c in product_code_aliases.items():
             if alias_c in result and result[alias_c].get('isPrimary', False):
