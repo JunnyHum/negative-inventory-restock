@@ -385,69 +385,78 @@ def check_restock_inbound_status(snapshots, skc, shipped_val, total_qty_val, shi
     - status_desc: 状态说明（生产完毕在途 / 已准确入库 / 生产中）
     - is_cleared: 是否从 Sheet 1 剔除
     """
-    ref_dt = ship_date or plan_date
-    is_recent = False
-    if ref_dt:
-        ref_d = ref_dt.date() if isinstance(ref_dt, datetime) else ref_dt
-        if ref_d >= today_date - timedelta(days=20):
-            is_recent = True
-    elif not is_shipped_clean_raw:
-        is_recent = True
+    act_d = ship_date.date() if isinstance(ship_date, datetime) else (ship_date if isinstance(ship_date, date) else None)
+    plan_d = plan_date.date() if isinstance(plan_date, datetime) else (plan_date if isinstance(plan_date, date) else None)
 
-    # 1. 历史老批次（出货/到货时间早于20天前，且标记出清）：保持历史出清
-    if not is_recent and is_shipped_clean_raw:
+    # 1. 严格判定工厂是否真正已经出厂出货：
+    # 必须满足以下真正出厂特征之一：
+    # a. 明确填报了实际出货数量 (shipped_val > 0)
+    # b. 明确标记了已完成/已清完/视觉黄色填充 (is_shipped_clean_raw == True)
+    # c. 实际出货日期已真实发生 (act_d <= today_date) 且明确不等于计划交期
+    # 严禁：当 shipped_val == 0 且未标记完成、且实际出货日期在未来 (act_d > today_date) 时判定为已出货！
+    has_really_shipped = False
+    if shipped_val is not None and shipped_val > 0:
+        has_really_shipped = True
+    elif is_shipped_clean_raw:
+        has_really_shipped = True
+    elif act_d is not None and act_d <= today_date and act_d != plan_d:
+        has_really_shipped = True
+
+    # 2. 如果根本未出货（工厂正常排单生产制造中）：
+    if not has_really_shipped:
+        eff_dt = plan_date if plan_date else ship_date
+        plan_str = (plan_d or act_d).strftime('%m-%d') if (plan_d or act_d) else "待定"
+        desc = orig_status if (orig_status and not any(kw in str(orig_status) for kw in ['已完成', '清', '在途', '入库'])) else f"🏭 生产中(预计{plan_str})"
+        return 'IN_PRODUCTION', eff_dt, desc, False
+
+    # 3. 如果已经出货，判断出货时间是否在近期（15天以内）：
+    ref_ship_d = act_d or plan_d
+    is_recent_shipment = False
+    if ref_ship_d:
+        # 只有在出货时间位于 [today - 15天, today + 3天] 之间，才可能处于当前物理在途
+        if today_date - timedelta(days=15) <= ref_ship_d <= today_date + timedelta(days=3):
+            is_recent_shipment = True
+
+    if not is_recent_shipment:
+        # 超过 15 天前的历史出货，早已结案/入库入账，归为历史出清（不再判定为在途）
         eff_dt = ship_date or plan_date
         return 'ARRIVED', eff_dt, ('已出清' if not orig_status else f"已出清({orig_status})"), True
 
-    # 2. 如果标记出清，或者填了出货数量/实际出货日期：进入动态增减量监测
-    has_shipment_indicated = (
-        is_shipped_clean_raw or
-        (shipped_val is not None and shipped_val > 0) or
-        (ship_date is not None)
-    )
-
-    if has_shipment_indicated:
-        # 统计 ship_date (或 plan_date) 前后及之后的物理库存正向入库增量 (ΔStock > 0)
-        pos_inbound = 0.0
-        start_check_dt = (ship_date - timedelta(days=1)) if ship_date else (datetime.combine(today_date, datetime.min.time()) - timedelta(days=7))
-        
-        if snapshots:
-            for i in range(1, len(snapshots)):
-                prev_dt, prev_st = snapshots[i-1]
-                cur_dt, cur_st = snapshots[i]
-                if cur_dt >= start_check_dt:
-                    prev_val = prev_st.get(skc, 0.0)
-                    cur_val = cur_st.get(skc, 0.0)
-                    delta = cur_val - prev_val
-                    if delta > 10.0:
-                        pos_inbound += delta
-                        
-        thresh = min(25.0, 0.35 * shipped_val) if (shipped_val and shipped_val > 0) else 25.0
-        
-        if pos_inbound >= thresh:
-            # 监测到匹配数量的正向增量 -> 已准确入库！
-            eff_dt = ship_date or plan_date
-            desc = f"✅ 已准确入库(+{int(pos_inbound)}件)"
-            return 'ARRIVED', eff_dt, desc, True
-        else:
-            # 未监测到有效正向增量 -> 生产完毕在途！
-            # 关键：有效交期绝不能使用过去的实际出货时间，优先取未来的 plan_date，否则推算到仓日
-            if plan_date and (plan_date.date() if isinstance(plan_date, datetime) else plan_date) >= today_date:
-                eff_dt = plan_date
-            else:
-                base_d = (ship_date.date() if isinstance(ship_date, datetime) else ship_date) if ship_date else today_date
-                eff_dt = max(datetime.combine(today_date, datetime.min.time()), datetime.combine(base_d + timedelta(days=3), datetime.min.time()))
-            
-            ship_qty_str = f"已出{int(shipped_val)}件/" if (shipped_val and shipped_val > 0) else ""
-            act_d_str = (ship_date.strftime('%m/%d') + " ") if ship_date else ""
-            desc = f"🚚 生产完毕在途({act_d_str}{ship_qty_str}待入库)"
-            return 'IN_TRANSIT', eff_dt, desc, False
+    # 4. 近期已出货批次：通过多期快照监测正向入库增量 (ΔStock > 0)
+    pos_inbound = 0.0
+    start_check_dt = datetime.combine(ref_ship_d - timedelta(days=1), datetime.min.time()) if ref_ship_d else (datetime.combine(today_date, datetime.min.time()) - timedelta(days=7))
+    
+    if snapshots:
+        for i in range(1, len(snapshots)):
+            prev_dt, prev_st = snapshots[i-1]
+            cur_dt, cur_st = snapshots[i]
+            if cur_dt >= start_check_dt:
+                prev_val = prev_st.get(skc, 0.0)
+                cur_val = cur_st.get(skc, 0.0)
+                delta = cur_val - prev_val
+                if delta > 10.0:
+                    pos_inbound += delta
+                    
+    thresh = min(25.0, 0.35 * shipped_val) if (shipped_val and shipped_val > 0) else 25.0
+    
+    if pos_inbound >= thresh:
+        # 监测到匹配数量的正向增量 -> 已准确入库！
+        eff_dt = ship_date or plan_date
+        desc = f"✅ 已准确入库(+{int(pos_inbound)}件)"
+        return 'ARRIVED', eff_dt, desc, True
     else:
-        # 正常生产中
-        eff_dt = plan_date
-        plan_str = plan_date.strftime('%m/%d') if plan_date else "待定"
-        desc = orig_status if orig_status else f"🏭 生产制造中(预计{plan_str})"
-        return 'IN_PRODUCTION', eff_dt, desc, False
+        # 真正处于在途状态！
+        # 有效到仓日期：优先取未来的计划交期，否则推算到仓日
+        if plan_d and plan_d >= today_date:
+            eff_dt = plan_date
+        else:
+            base_d = act_d if act_d else today_date
+            eff_dt = max(datetime.combine(today_date, datetime.min.time()), datetime.combine(base_d + timedelta(days=3), datetime.min.time()))
+        
+        ship_qty_str = f"已出{int(shipped_val)}件/" if (shipped_val and shipped_val > 0) else ""
+        act_d_str = (ref_ship_d.strftime('%m/%d') + " ") if ref_ship_d else ""
+        desc = f"🚚 生产完毕在途({act_d_str}{ship_qty_str}待入库)"
+        return 'IN_TRANSIT', eff_dt, desc, False
 
 def load_warehouse(filepath):
     """
