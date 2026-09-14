@@ -1382,135 +1382,6 @@ def analyze():
     master_active_code_colors = set() # 仅存放在大货进度表中【在途/未结清】的 (款号, 颜色/颜色编号)
     master_records_db = [] # 存放两张大货总表解析出的全量四维翻单条目数据库 [{'code', 'cc', 'color', 'date', 'qty'}]
 
-    # ── 预扫描各大货表中每个 SKC 的最新实际出货日期 ──────────────────────────
-    skc_max_shipped_date = {}
-    for mf in (list(sg_files) + list(nba_files)):
-        if not mf or not os.path.exists(mf):
-            continue
-        try:
-            wb_scan = openpyxl.load_workbook(mf, data_only=True, read_only=True)
-            for s_name in wb_scan.sheetnames:
-                ws_scan = wb_scan[s_name]
-                h_num, idxs = getHeaderRowAndIndexes(ws_scan)
-                if idxs['code'] is None:
-                    continue
-                s_idx = idxs.get('shipped')
-                a_idx = idxs.get('actual_arrival')
-                c_idx = idxs.get('color')
-                for r_scan in ws_scan.iter_rows(min_row=h_num + 1, values_only=True):
-                    if len(r_scan) <= idxs['code']:
-                        continue
-                    p_code = str(r_scan[idxs['code']]).strip() if r_scan[idxs['code']] else ''
-                    if not p_code:
-                        continue
-                    color_s = str(r_scan[c_idx]) if (c_idx is not None and len(r_scan) > c_idx and r_scan[c_idx]) else ''
-                    m_c = re.search(r'\[(\d+)\]', color_s)
-                    c_num = m_c.group(1) if m_c else '00'
-                    s_skc = p_code + c_num
-                    s_val = None
-                    if s_idx is not None and len(r_scan) > s_idx and r_scan[s_idx] is not None:
-                        try:
-                            s_val = float(r_scan[s_idx])
-                        except ValueError:
-                            pass
-                    s_dt = get_date_value(r_scan[a_idx]) if (a_idx is not None and len(r_scan) > a_idx) else None
-                    if s_val and s_dt:
-                        if s_skc not in skc_max_shipped_date or s_dt > skc_max_shipped_date[s_skc]:
-                            skc_max_shipped_date[s_skc] = s_dt
-            wb_scan.close()
-        except Exception as scan_err:
-            logger.warning("预扫描出货日期异常: %s", scan_err)
-
-    def evaluate_restock_lifecycle(pc, skc, shipped_val, total_qty_val, shipped_date, plan_date, orig_status, cleared_val, row_yellow_clean):
-        """
-        以库存动态监控为准的翻单生命周期判定引擎：
-        返回: (lifecycle, is_in_transit, is_shipped_clean, effective_date, display_status)
-        - lifecycle: 'PRODUCING' | 'IN_TRANSIT' | 'INBOUNDED'
-        - is_in_transit: 是否处于工厂已出货但在途未入库状态
-        - is_shipped_clean: 是否实物已完全入库且完成出清
-        - effective_date: 真实有效预计到仓日期
-        - display_status: 供客服与报表展示的高辨识度状态文本
-        """
-        curr_entity = whEntityTotal.get(skc, 0.0)
-        curr_avail = wh_neg_total.get(skc, 0.0)
-
-        has_shipped_signal = False
-        if shipped_val is not None and shipped_val > 0:
-            has_shipped_signal = True
-        if shipped_date is not None:
-            has_shipped_signal = True
-        if cleared_val and any(x in str(cleared_val) for x in ['清', '是', '已清', '完', '已出', '已发']):
-            has_shipped_signal = True
-        if row_yellow_clean:
-            has_shipped_signal = True
-        if orig_status and any(x in str(orig_status) for x in ['已完成', '出清', '已发', '已出', '发完', '清完']):
-            has_shipped_signal = True
-
-        if not has_shipped_signal:
-            effective_date = plan_date if plan_date else (shipped_date if shipped_date else None)
-            display_status = orig_status if orig_status else "🏭 工厂生产中"
-            return ('PRODUCING', False, False, effective_date, display_status)
-
-        days_since_shipped = 0
-        ref_shipped_dt = shipped_date if shipped_date else (plan_date if plan_date else today)
-        if isinstance(ref_shipped_dt, datetime):
-            days_since_shipped = (today - ref_shipped_dt).days
-        elif isinstance(ref_shipped_dt, date):
-            days_since_shipped = (today.date() - ref_shipped_dt).days
-
-        # 如果该 SKC 存在更新的出货批次，则当前批次必然已经属于过去出厂且入库的旧批次
-        is_superseded = False
-        if shipped_date and skc in skc_max_shipped_date and shipped_date < skc_max_shipped_date[skc]:
-            is_superseded = True
-
-        # 判断实物是否已经“准确入库”：
-        # 1. 该批次已被更新出货批次替代
-        # 2. 仓库可销现货充足 (curr_avail >= 10 且 curr_entity >= 20)
-        # 3. 距出货已超 7 天的历史批次
-        # 4. 仓库实体库存数已能承接出货量大部分 (curr_entity >= shipped_val * 0.6 且 curr_entity >= 30)
-        is_already_inbounded = False
-        if is_superseded:
-            is_already_inbounded = True
-        elif curr_avail >= 10 and curr_entity >= 20:
-            is_already_inbounded = True
-        elif days_since_shipped > 7:
-            is_already_inbounded = True
-        elif shipped_val is not None and shipped_val > 0 and curr_entity >= max(shipped_val * 0.6, 30.0):
-            is_already_inbounded = True
-
-        if is_already_inbounded:
-            effective_date = shipped_date if shipped_date else plan_date
-            if curr_avail >= 0:
-                display_status = f"✅ 已入库 ({orig_status})" if orig_status else "✅ 已入库"
-                return ('INBOUNDED', False, True, effective_date, display_status)
-            else:
-                display_status = f"⚠️ 上批已入库发完 ({orig_status})" if orig_status else "⚠️ 上批已入库发完"
-                return ('INBOUNDED', False, True, effective_date, display_status)
-
-        # 生产完毕在途（工厂已出货，但仓库实物尚未入库）
-        if plan_date and plan_date >= today:
-            effective_date = plan_date
-        elif shipped_date:
-            effective_date = max(shipped_date + timedelta(days=3), today)
-        else:
-            effective_date = today + timedelta(days=2)
-
-        ship_cnt_str = f"{int(shipped_val)}件" if (shipped_val is not None and shipped_val > 0) else (f"{int(total_qty_val)}件" if total_qty_val > 0 else "")
-        ship_date_str = shipped_date.strftime('%m/%d') if (shipped_date and isinstance(shipped_date, (datetime, date))) else ""
-
-        detail_msg = []
-        if ship_date_str:
-            detail_msg.append(f"工厂{ship_date_str}已出")
-        if ship_cnt_str:
-            detail_msg.append(ship_cnt_str)
-        detail_msg.append("待仓库入库")
-        if orig_status and orig_status not in ['已完成', '已出清']:
-            detail_msg.append(orig_status)
-
-        detail_str = ' '.join(detail_msg)
-        display_status = f"🚚 生产完毕在途 ({detail_str})"
-        return ('IN_TRANSIT', True, False, effective_date, display_status)
-
     # SG品牌进度表 (多文件与多 Sheet 自适应与日期回退)
     for sg_file in sg_files:
         wb1 = openpyxl.load_workbook(sg_file, data_only=True, read_only=True)
@@ -1556,79 +1427,71 @@ def analyze():
                 # 自适应换行拆分
                 sub_rds = split_row_by_newline(rd_raw, sg_indexes)
                 for rd in sub_rds:
-                    color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
-                    spec_val_sg = str(rd[sg_indexes['spec']]).strip() if (sg_indexes.get('spec') is not None and len(rd) > sg_indexes['spec'] and rd[sg_indexes['spec']]) else None
-                    cc = resolve_color_code(pc, color, spec_val_sg)
-                    skc = pc + cc
-                    
-                    # 提取实际到仓/出货时间与计划到仓/出货时间
-                    act_idx = sg_indexes['actual_arrival']
-                    shipped_date = get_date_value(rd[act_idx]) if (act_idx is not None and len(rd) > act_idx) else None
-                    plan_idx = sg_indexes['plan_arrival']
-                    plan_date = get_date_value(rd[plan_idx]) if (plan_idx is not None and len(rd) > plan_idx) else None
-                    
+                    # 过滤已出货 (精细化判定：已清完，或黄色背景填充，或已出货量 >= 总下单量)
                     shipped_idx = sg_indexes['shipped']
-                    shipped_val = None
-                    if shipped_idx is not None and len(rd) > shipped_idx and rd[shipped_idx] is not None:
-                        try:
-                            shipped_val = float(rd[shipped_idx])
-                        except ValueError:
-                            pass
-
                     cleared_idx = sg_indexes.get('cleared')
-                    cleared_val = str(rd[cleared_idx]).strip() if (cleared_idx is not None and len(rd) > cleared_idx and rd[cleared_idx] is not None) else ''
-                    
-                    status_idx = sg_indexes['status']
-                    orig_status = str(rd[status_idx])[:30] if (status_idx is not None and len(rd) > status_idx and rd[status_idx]) else ''
-
-                    # 提取下单总量
                     total_qty_idx = sg_indexes.get('total_qty')
-                    total_qty_val = 0
-                    if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
-                        try:
-                            total_qty_val = max(0.0, float(rd[total_qty_idx]))
-                        except ValueError:
-                            pass
-
-                    # 核心：以库存动态监控为准的生命周期判定
-                    lifecycle, is_in_transit, is_shipped_clean, effective_date, display_status = evaluate_restock_lifecycle(
-                        pc, skc, shipped_val, total_qty_val, shipped_date, plan_date, orig_status, cleared_val, row_yellow_clean
-                    )
+                    
+                    is_shipped_clean = False
+                    
+                    # 1. 优先通过 "是否清完" 列进行结清打标判定
+                    if cleared_idx is not None and len(rd) > cleared_idx:
+                        cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
+                        if any(x in cleared_val for x in ['清', '是', '已清', '完']):
+                            is_shipped_clean = True
+                    
+                    # 2. 生产部视觉打标：单元格黄色背景填充表示出清
+                    if not is_shipped_clean and row_yellow_clean:
+                        is_shipped_clean = True
+                    
+                    # 2. 备选：必须同时存在总下单量且出货量 >= 总下单量，才判定为结清
+                    if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
+                        shipped = rd[shipped_idx]
+                        if shipped is not None and shipped != '':
+                            try:
+                                shipped_val = float(shipped)
+                                if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                                    try:
+                                        total_qty_val = float(rd[total_qty_idx])
+                                        if total_qty_val > 0 and shipped_val >= total_qty_val:
+                                            is_shipped_clean = True
+                                    except ValueError:
+                                        pass
+                            except ValueError:
+                                pass
                                 
                     color_clean = re.sub(r'\[\d+\]', '', color_raw).strip()
                     color_clean = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean).strip()
                     # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
-                    if not is_shipped_clean or is_in_transit:
+                    if not is_shipped_clean:
                         if cc_raw:
                             master_active_skcs.add(pc + cc_raw)
                         if color_clean:
                             master_active_code_colors.add((pc, color_clean))
                             if cc_raw:
                                 master_active_code_colors.add((pc, cc_raw))
+                                
+                    color = str(rd[sg_indexes['color']]) if rd[sg_indexes['color']] else ''
+                    spec_val_sg = str(rd[sg_indexes['spec']]).strip() if (sg_indexes.get('spec') is not None and len(rd) > sg_indexes['spec'] and rd[sg_indexes['spec']]) else None
+                    cc = resolve_color_code(pc, color, spec_val_sg)
+                    skc = pc + cc
+                    
+                    # 实际到仓时间 / 实际出货时间 提取（带回退）
+                    actual_date = None
+                    act_idx = sg_indexes['actual_arrival']
+                    if act_idx is not None and len(rd) > act_idx:
+                        actual_date = get_date_value(rd[act_idx])
+                    if actual_date is None:
+                        plan_idx = sg_indexes['plan_arrival']
+                        if plan_idx is not None and len(rd) > plan_idx:
+                            actual_date = get_date_value(rd[plan_idx])
                             
-                    key = (skc, effective_date)
+                    key = (skc, actual_date)
                     if key not in all_restock:
-                        all_restock[key] = {
-                            'sizes': {k: 0 for k in SIZE_KEYS},
-                            'color': color,
-                            'status': display_status,
-                            'factory': '',
-                            'is_master': True,
-                            'source': '',
-                            'in_transit': is_in_transit,
-                            'is_cleared': is_shipped_clean,
-                            'lifecycle': lifecycle,
-                            'raw_delivery': shipped_date or plan_date
-                        }
+                        all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': '', 'is_master': True, 'source': ''}
                     else:
                         all_restock[key]['is_master'] = True
                         all_restock[key]['source'] = ''
-                        if is_in_transit:
-                            all_restock[key]['in_transit'] = True
-                            all_restock[key]['is_cleared'] = False
-                            all_restock[key]['status'] = display_status
-                        elif is_shipped_clean and not all_restock[key].get('in_transit'):
-                            all_restock[key]['is_cleared'] = True
                         
                     # 提取各个尺码数量并准备重新分摊
                     row_sizes = {}
@@ -1642,6 +1505,14 @@ def analyze():
                         row_sizes[sz] = val
                         row_sizes_sum += val
                         
+                    # 提取下单总量
+                    total_qty_val = 0
+                    if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                        try:
+                            total_qty_val = max(0.0, float(rd[total_qty_idx]))
+                        except ValueError:
+                            pass
+                            
                     if total_qty_val > 0:
                         if abs(row_sizes_sum - total_qty_val) > 1.0:
                             if row_sizes_sum > 0:
@@ -1668,6 +1539,14 @@ def analyze():
                     for sz, val in row_sizes.items():
                         all_restock[key]['sizes'][sz] += val
                         
+                    status_idx = sg_indexes['status']
+                    orig_status = str(rd[status_idx])[:30] if (status_idx is not None and len(rd) > status_idx and rd[status_idx]) else ''
+                    if is_shipped_clean:
+                        all_restock[key]['status'] = '已出清' if not orig_status else f"已出清({orig_status})"
+                        all_restock[key]['is_cleared'] = True
+                    elif orig_status:
+                        all_restock[key]['status'] = orig_status
+                        
                     factory_idx = sg_indexes['factory']
                     if factory_idx is not None and len(rd) > factory_idx and rd[factory_idx]:
                         all_restock[key]['factory'] = str(rd[factory_idx])
@@ -1681,9 +1560,9 @@ def analyze():
                         'code': pc,
                         'cc': cc_raw,
                         'color': color_clean,
-                        'date': effective_date,
+                        'date': actual_date,
                         'qty': total_qty_val,
-                        'is_cleared': (is_shipped_clean and not is_in_transit)
+                        'is_cleared': is_shipped_clean
                     })
         wb1.close()
 
@@ -1727,48 +1606,43 @@ def analyze():
                     
                 master_progress_codes.add(pc)
                     
-                color = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
-                spec_val_nba = str(rd[nba_indexes['spec']]).strip() if (nba_indexes.get('spec') is not None and len(rd) > nba_indexes['spec'] and rd[nba_indexes['spec']]) else None
-                cc = resolve_color_code(pc, color, spec_val_nba)
-                skc = pc + cc
-                
-                # 提取实际到仓/出货时间与计划到仓/出货时间
-                act_idx = nba_indexes['actual_arrival']
-                shipped_date = get_date_value(rd[act_idx]) if (act_idx is not None and len(rd) > act_idx) else None
-                plan_idx = nba_indexes['plan_arrival']
-                plan_date = get_date_value(rd[plan_idx]) if (plan_idx is not None and len(rd) > plan_idx) else None
-
+                # 过滤已出货 (精细化判定：已清完，或黄色背景，或已出货量 >= 总下单量)
                 shipped_idx = nba_indexes['shipped']
-                shipped_val = None
-                if shipped_idx is not None and len(rd) > shipped_idx and rd[shipped_idx] is not None:
-                    try:
-                        shipped_val = float(rd[shipped_idx])
-                    except ValueError:
-                        pass
-
                 cleared_idx = nba_indexes.get('cleared')
-                cleared_val = str(rd[cleared_idx]).strip() if (cleared_idx is not None and len(rd) > cleared_idx and rd[cleared_idx] is not None) else ''
-
-                status_idx = nba_indexes['status']
-                orig_status_nba = str(rd[status_idx])[:30] if (status_idx is not None and len(rd) > status_idx and rd[status_idx]) else ''
-
                 total_qty_idx = nba_indexes.get('total_qty')
-                total_qty_nba = 0
-                if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
-                    try:
-                        total_qty_nba = float(rd[total_qty_idx])
-                    except ValueError:
-                        pass
-
-                # 核心：以库存动态监控为准的生命周期判定
-                lifecycle, is_in_transit, is_shipped_clean, effective_date, display_status = evaluate_restock_lifecycle(
-                    pc, skc, shipped_val, total_qty_nba, shipped_date, plan_date, orig_status_nba, cleared_val, row_yellow_clean_nba
-                )
-
+                
+                is_shipped_clean = False
+                
+                # 1. 优先通过 "是否清完" 列进行结清打标判定
+                if cleared_idx is not None and len(rd) > cleared_idx:
+                    cleared_val = str(rd[cleared_idx]).strip() if rd[cleared_idx] is not None else ''
+                    if any(x in cleared_val for x in ['清', '是', '已清', '完']):
+                        is_shipped_clean = True
+                
+                # 2. 生产部视觉打标：单元格黄色背景填充表示出清
+                if not is_shipped_clean and row_yellow_clean_nba:
+                    is_shipped_clean = True
+                
+                # 2. 备选：必须同时存在总下单量且出货量 >= 总下单量，才判定为结清
+                if not is_shipped_clean and shipped_idx is not None and len(rd) > shipped_idx:
+                    shipped = rd[shipped_idx]
+                    if shipped is not None and shipped != '':
+                        try:
+                            shipped_val = float(shipped)
+                            if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                                try:
+                                    total_qty_val = float(rd[total_qty_idx])
+                                    if total_qty_val > 0 and shipped_val >= total_qty_val:
+                                        is_shipped_clean = True
+                                except ValueError:
+                                    pass
+                        except ValueError:
+                            pass
+                            
                 color_clean2 = re.sub(r'\[\d+\]', '', color_raw2).strip()
                 color_clean2 = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean2).strip()
                 # 关键逻辑：在途/未结清的记录纳入 master_active_skcs 用于四维对账
-                if not is_shipped_clean or is_in_transit:
+                if not is_shipped_clean:
                     if cc_raw2:
                         master_active_skcs.add(pc + cc_raw2)
                     if color_clean2:
@@ -1776,35 +1650,41 @@ def analyze():
                         if cc_raw2:
                             master_active_code_colors.add((pc, cc_raw2))
                             
-                key = (skc, effective_date)
+                color = str(rd[nba_indexes['color']]) if rd[nba_indexes['color']] else ''
+                spec_val_nba = str(rd[nba_indexes['spec']]).strip() if (nba_indexes.get('spec') is not None and len(rd) > nba_indexes['spec'] and rd[nba_indexes['spec']]) else None
+                cc = resolve_color_code(pc, color, spec_val_nba)
+                skc = pc + cc
+                
+                # 实际到仓时间 / 实际出货时间 提取（带回退）
+                actual_date = None
+                act_idx = nba_indexes['actual_arrival']
+                if act_idx is not None and len(rd) > act_idx:
+                    actual_date = get_date_value(rd[act_idx])
+                if actual_date is None:
+                    plan_idx = nba_indexes['plan_arrival']
+                    if plan_idx is not None and len(rd) > plan_idx:
+                        actual_date = get_date_value(rd[plan_idx])
+                        
+                key = (skc, actual_date)
                 if key not in all_restock:
-                    all_restock[key] = {
-                        'sizes': {k: 0 for k in SIZE_KEYS},
-                        'color': color,
-                        'status': display_status,
-                        'factory': '',
-                        'is_master': True,
-                        'source': '',
-                        'in_transit': is_in_transit,
-                        'is_cleared': is_shipped_clean,
-                        'lifecycle': lifecycle,
-                        'raw_delivery': shipped_date or plan_date
-                    }
+                    all_restock[key] = {'sizes': {k: 0 for k in SIZE_KEYS}, 'color': color, 'status': '', 'factory': '', 'is_master': True, 'source': ''}
                 else:
                     all_restock[key]['is_master'] = True
                     all_restock[key]['source'] = ''
-                    if is_in_transit:
-                        all_restock[key]['in_transit'] = True
-                        all_restock[key]['is_cleared'] = False
-                        all_restock[key]['status'] = display_status
-                    elif is_shipped_clean and not all_restock[key].get('in_transit'):
-                        all_restock[key]['is_cleared'] = True
                     
                 for sz, idx in nba_indexes['sizes'].items():
                     if idx is not None and len(rd) > idx:
                         val = rd[idx]
                         all_restock[key]['sizes'][sz] += val if isinstance(val, (int, float)) else 0
                         
+                status_idx = nba_indexes['status']
+                orig_status_nba = str(rd[status_idx])[:30] if (status_idx is not None and len(rd) > status_idx and rd[status_idx]) else ''
+                if is_shipped_clean:
+                    all_restock[key]['status'] = '已出清' if not orig_status_nba else f"已出清({orig_status_nba})"
+                    all_restock[key]['is_cleared'] = True
+                elif orig_status_nba:
+                    all_restock[key]['status'] = orig_status_nba
+                    
                 factory_idx = nba_indexes['factory']
                 if factory_idx is not None and len(rd) > factory_idx and rd[factory_idx]:
                     all_restock[key]['factory'] = str(rd[factory_idx])
@@ -1814,13 +1694,17 @@ def analyze():
                     master_progress_skcs.add(skc)
                     
                 # 注册四维对账条目至数据库
+                total_qty_nba = 0
+                if total_qty_idx is not None and len(rd) > total_qty_idx and rd[total_qty_idx] is not None:
+                    try: total_qty_nba = float(rd[total_qty_idx])
+                    except: pass
                 master_records_db.append({
                     'code': pc,
                     'cc': cc_raw2,
                     'color': color_clean2,
-                    'date': effective_date,
+                    'date': actual_date,
                     'qty': total_qty_nba,
-                    'is_cleared': (is_shipped_clean and not is_in_transit)
+                    'is_cleared': is_shipped_clean
                 })
         wb2.close()
 
@@ -2259,18 +2143,13 @@ def analyze():
                 final_dt = best_entry[1]
                 final_delivery_str = '交期未填/待定'
 
-            # 2. 生产状态融合：优先保留包含在途或具体生产进度的描述
+            # 2. 生产状态融合：优先保留包含具体生产进度的描述
             statuses = [it[2].get('status', '') for it in item_list if it[2].get('status') and str(it[2].get('status')) != 'None']
             detailed_status = ''
             for st in statuses:
-                if '在途' in str(st):
+                if any(kw in str(st) for kw in ['中', '在', '料', '定做', '订做', '改', '裁', '开板', '已出清', '缺失', '到仓', '待登']):
                     detailed_status = str(st)
                     break
-            if not detailed_status:
-                for st in statuses:
-                    if any(kw in str(st) for kw in ['中', '在', '料', '定做', '订做', '改', '裁', '开板', '已出清', '缺失', '到仓', '待登']):
-                        detailed_status = str(st)
-                        break
             if not detailed_status and statuses:
                 detailed_status = str(statuses[-1])
 
@@ -2299,10 +2178,7 @@ def analyze():
             # 5. 若包含大货总表，标记已登记
             if master_items:
                 merged_d['is_omitted_from_master'] = False
-            if any(it[2].get('in_transit', False) for it in item_list):
-                merged_d['in_transit'] = True
-                merged_d['is_cleared'] = False
-            elif any(it[2].get('is_cleared', False) for it in item_list):
+            if any(it[2].get('is_cleared', False) for it in item_list):
                 merged_d['is_cleared'] = True
 
             deduped.append((skc, final_dt, merged_d))
@@ -2353,8 +2229,8 @@ def analyze():
                 d_cust['source'] = ''
             customer_results.append((skc, actual_date, d_cust))
 
-        # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，但生产完毕在途必须保留！排除历史散表未下单项，需在网红店商品表中登记，且在统一窗口期内）
-        if d.get('is_cleared', False) and not d.get('in_transit', False): continue
+        # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在统一窗口期内）
+        if d.get('is_cleared', False): continue
         if is_unconfirmed_old: continue
         if skc not in neg_skcs: continue
         pc_code = skc[:8]
@@ -2669,10 +2545,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         rn = ws1.max_row
         
         isApprox = d.get('isApprox', False)
-        isInTransit = d.get('in_transit', False)
-        if isInTransit:
-            fill_color = 'D9E1F2'
-        elif isApprox:
+        if isApprox:
             fill_color = 'FFF2CC'
         else:
             fill_color = 'FCE4D6' if wh_total < 0 else 'DAEFCE'
@@ -2683,7 +2556,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 28, 8, 14, 16]
+    cw1 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 12, 20, 8, 14, 16]
     for ci, w in enumerate(cw1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
     ws1.freeze_panes = 'A2'
@@ -2691,7 +2564,6 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
 
     # 绘制 Sheet1 右侧告示区
     draw_legend_box(ws1, 26, [
-        ('D9E1F2', '🚚 生产完毕在途', '工厂已出厂发往仓库(实物未入库)，重点催促仓库到货验收与扫码上架'),
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
         ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
@@ -2856,19 +2728,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ws4.append(row)
         rn = ws4.max_row
         
-        isInTransit = d.get('in_transit', False)
-        if isInTransit:
-            fill_color = 'D9E1F2'  # 浅蓝紫：生产完毕在途
-        else:
-            fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
-            
+        fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
         for ci in range(1, len(headers4) + 1):
             cell = ws4.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 28, 10, 24]
+    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
     for ci, w in enumerate(cw4, 1):
         ws4.column_dimensions[get_column_letter(ci)].width = w
     ws4.freeze_panes = 'A2'
@@ -2876,7 +2743,6 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
 
     # 绘制 Sheet4 右侧客服专属告示区
     draw_legend_box(ws4, 25, [
-        ('D9E1F2', '🚚 浅蓝紫标示', '生产完毕在途 (工厂已发货/待仓库入库)，可明确承诺买家 1~2 天内发货'),
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货')
