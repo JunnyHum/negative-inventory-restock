@@ -55,8 +55,13 @@ logger = logging.getLogger(__name__)
 SIZE_KEYS = ['XS', 'S', 'M', 'L', 'XL', '2XL', '均码']
 SIZE_LAST_MAP = {'3': 'XS', '4': 'S', '5': 'M', '6': 'L', '7': 'XL', '8': '2XL', '0': '均码'}
 
-# 本店铺未上架商品黑名单/排除款号（用户指定不纳入分析记录的非本店铺销售款式）
-EXCLUDED_UNOFFICIAL_CODES = {'WD920217'}
+# 明确不翻单 / 停产淘汰的 SKU/SKC 集合（用户明确指示不翻单，不纳入负库存跟进与建议）
+DISCONTINUED_SKCS = {
+    'WE13110735',  # 用户明确指示：WE13110735这款sku明确已经不翻单
+}
+
+# 本店铺未上架商品黑名单/排除款号（用户指定不纳入分析记录的非本店铺销售款式或已淘汰SKU）
+EXCLUDED_UNOFFICIAL_CODES = {'WD920217'} | DISCONTINUED_SKCS
 
 # 人工指定的款式到货交期校准字典（针对散表中遗留历史日期或业务最新改期调整）
 MANUAL_DELIVERY_OVERRIDES = {}
