@@ -894,6 +894,27 @@ def has_skc_stock(skc, sizes, is_junma):
                 return True
         return False
 
+def find_matched_restock_info(skc, all_restock, today_d):
+    """
+    寻找该 SKC 最近期（货期在过去 45 天到未来 30 天内）且与到货相关的翻单批次信息：
+    返回: (best_restock_qty, best_shipped_qty, best_date, best_factory)
+    """
+    matches = []
+    for (s, d_dt), info in all_restock.items():
+        if s == skc:
+            tot_qty = sum(info.get('sizes', {}).values())
+            ship_qty = info.get('shipped_val', 0.0)
+            target_qty = max(tot_qty, ship_qty)
+            if target_qty > 0:
+                matches.append((d_dt, tot_qty, ship_qty, target_qty, info.get('factory', '')))
+    if not matches:
+        return 0, 0, None, ''
+    
+    # 优先匹配到期日最接近今天的批次
+    matches.sort(key=lambda x: abs((x[0].date() - today_d).days) if hasattr(x[0], 'date') else 999)
+    best = matches[0]
+    return int(best[1]), int(best[2]), best[0], best[4]
+
 def findColumnIndexes(headerCells: list) -> dict:
     """
     根据表头单元格值列表，自动匹配各个关键字段的列索引（0-based）
@@ -1539,9 +1560,10 @@ def analyze():
     prev_neg_size   = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
     prev_tw011_avail = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
     prev_tw011_stock = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
+    prev_entity_total = defaultdict(float)
     if prev_wh_file:
         logger.info("前一次库存文件: %s", prev_wh_file)
-        prev_neg_total, prev_neg_size, _, _, prev_tw011_avail, prev_tw011_stock, _, _ = load_warehouse(prev_wh_file)
+        prev_neg_total, prev_neg_size, prev_entity_total, _, prev_tw011_avail, prev_tw011_stock, _, _ = load_warehouse(prev_wh_file)
 
     # ── 构建仓库物理库存时间序列（用于翻单动态入库与在途判定）──
     wh_snapshots_timeline = build_inventory_timeline(valid_wh_files, max_snapshots=18)
@@ -2124,7 +2146,7 @@ def analyze():
 
     logger.info("翻单记录: %d条", len(all_restock))
 
-    # ── 3.8 生成库存回补数据（Sheet2）─────────────────────────────────
+    # ── 3.8 生成库存回补数据（Sheet2：翻单到货智能对齐引擎）─────────────────
     sheet2_data = []
     if prev_wh_file:
         for skc, cur_total in wh_neg_total.items():
@@ -2142,26 +2164,74 @@ def analyze():
             
             # 核心回补条件：前一次无库存（断货/超卖），本次到货扫码入库恢复有库存
             if not prev_has_stock and cur_has_stock:
-                productCode = skc[:8]
-                if productCode in product_table:
-                    listDate = product_table[productCode].get('上架日期')
-                    if listDate and hasattr(listDate, 'date') and listDate.date() > today_date:
-                        remark = '🚀 自动铺货(新品预售)'
-                    else:
-                        remark = '📦 开启商品同步'
-                elif productCode in master_progress_codes or skc in master_progress_skcs or skc in skc_has_any:
-                    remark = '🌟 大货新品到仓(待上架)'
-                else:
-                    remark = '❓ 异常新品到仓(商品表未录)'
+                prev_tot_val = prev_neg_total.get(skc, 0.0)
+                cur_ent_val = whEntityTotal.get(skc, 0.0)
+                prev_ent_val = prev_entity_total.get(skc, 0.0) if prev_entity_total else 0.0
+                
+                # 计算本次真实恢复的物理入库增量
+                delta_avail = cur_total - prev_tot_val
+                delta_entity = cur_ent_val - prev_ent_val
+                inbound_delta = max(delta_avail, delta_entity)
+                if inbound_delta <= 0:
+                    inbound_delta = max(cur_total, cur_ent_val)
                     
+                # 严格防线1：本次实际正品恢复增量必须 >= 10件（坚决过滤 1~5 件日常零星退货/样品/盘点微调）
+                if inbound_delta < 10.0:
+                    continue
+                    
+                # 寻找匹配的生产部翻单记录
+                restock_qty, shipped_qty, r_date, r_factory = find_matched_restock_info(skc, all_restock, today_date)
+                target_order_qty = max(restock_qty, shipped_qty)
+                
+                productCode = skc[:8]
+                is_in_product_table = (productCode in product_table)
+                match_ratio = (inbound_delta / target_order_qty) if target_order_qty > 0 else 0.0
+                
+                remark = ''
+                status_priority = 99
+                
+                if target_order_qty >= 10:
+                    # 场景A：翻单大货足额到齐（匹配接近，达成率 >= 60%）
+                    if match_ratio >= 0.60:
+                        pct_str = f"{int(match_ratio * 100)}%"
+                        remark = f"🟢 翻单大货到齐(翻单{target_order_qty}件/实到{int(inbound_delta)}件, 达成率{pct_str}) ➔ 建议开启同步"
+                        status_priority = 1
+                    # 场景B：翻单分批先到（达成率 20%~60% 且实到 >= 15件）
+                    elif match_ratio >= 0.20 and inbound_delta >= 15.0:
+                        pct_str = f"{int(match_ratio * 100)}%"
+                        remark = f"🟡 翻单分批先到(翻单{target_order_qty}件/先到{int(inbound_delta)}件, 达成率{pct_str}) ➔ 酌情/限额开启同步"
+                        status_priority = 2
+                    else:
+                        # 翻单量很大（如500件），但入库数量极少（<15件或<20%），视为零星到货，不触发开启同步
+                        continue
+                else:
+                    # 场景C：无明确翻单的大批量到仓（实到 >= 30件）
+                    if inbound_delta >= 30.0:
+                        if not is_in_product_table and (productCode in master_progress_codes or skc in master_progress_skcs or skc in skc_has_any):
+                            remark = f"🌟 大货新品到仓(实到{int(inbound_delta)}件) ➔ 待建档上架"
+                            status_priority = 3
+                        elif is_in_product_table:
+                            remark = f"🔵 批量到货入库(实到{int(inbound_delta)}件/无明确翻单) ➔ 运营核实后开启"
+                            status_priority = 4
+                        else:
+                            remark = f"❓ 异常批量到仓(实到{int(inbound_delta)}件/商品表未录) ➔ 待供应链核对"
+                            status_priority = 5
+                    else:
+                        # 无翻单且恢复量在 10~29 件之间（零散调拨或散件），不干扰运营
+                        continue
+                        
                 sheet2_data.append({
                     'skc': skc,
                     'color': wh_colors_txt.get(skc, ''),
                     'cur_total': cur_total,
                     'prev_total': prev_neg_total.get(skc, 0),
+                    'inbound_delta': inbound_delta,
+                    'target_order_qty': target_order_qty,
+                    'match_ratio': match_ratio,
                     'prev_sizes': prev_sizes,
                     'cur_sizes':  cur_sizes,
                     '备注': remark,
+                    'priority': status_priority,
                 })
     logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
 
@@ -2752,9 +2822,11 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     # ── Sheet2: 库存回补 ─────────────────────────────────────────────
     ws2 = wb.create_sheet('库存回补')
     headers2 = ['款号', 'SKC', '颜色',
-                 '当前可销', '当前实体',
-                 '前表可销', 'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
-                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后', '备注', '同链接主款', '商品ID']
+                 '当前可销', '当前实体', '前表可销',
+                 '恢复净增', '对应翻单数', '到货达成率',
+                 'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
+                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后',
+                 '运营操作指令', '同链接主款', '商品ID']
     ws2.append(headers2)
     for ci, h in enumerate(headers2, 1):
         cell = ws2.cell(1, ci)
@@ -2762,17 +2834,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
 
-    # 按运营优先级排序：1.开启商品同步 ➔ 2.大货新品到仓 ➔ 3.自动铺货 ➔ 4.异常新品到仓
-    priority_map = {
-        '📦 开启商品同步': 1,
-        '开启商品同步': 1,
-        '🌟 大货新品到仓(待上架)': 2,
-        '🚀 自动铺货(新品预售)': 3,
-        '自动铺货': 3,
-        '❓ 异常新品到仓(商品表未录)': 4,
-        '新款待上架': 4
-    }
-    sorted_sheet2 = sorted(sheet2_data, key=lambda x: priority_map.get(x.get('备注', ''), 99))
+    # 按运营优先级排序：1.大货足额到齐 ➔ 2.分批先到 ➔ 3.大货新品 ➔ 4.批量待核
+    sorted_sheet2 = sorted(sheet2_data, key=lambda x: x.get('priority', 99))
 
     for d2 in sorted_sheet2:
         skc        = d2['skc']
@@ -2780,11 +2843,19 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         prev_sizes = d2['prev_sizes']
         entity     = whEntityTotal.get(skc, 0)
         remark     = d2.get('备注', '')
+        inbound_d  = d2.get('inbound_delta', 0)
+        target_q   = d2.get('target_order_qty', 0)
+        m_ratio    = d2.get('match_ratio', 0)
+        
+        target_str = str(int(target_q)) if target_q > 0 else '-'
+        ratio_str  = f"{int(m_ratio * 100)}%" if target_q > 0 else '-'
+        
         main_code, item_id = get_link_details(skc[:8])
         row = [
             skc[:8], skc, d2['color'],
             round(d2['cur_total'], 0), round(entity, 0),
             round(d2['prev_total'], 0),
+            round(inbound_d, 0), target_str, ratio_str,
             round(prev_sizes.get('XS', 0), 0), round(prev_sizes.get('S', 0), 0),
             round(prev_sizes.get('M', 0), 0),   round(prev_sizes.get('L', 0), 0),
             round(prev_sizes.get('XL', 0), 0),  round(prev_sizes.get('2XL', 0), 0),
@@ -2800,34 +2871,38 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ]
         ws2.append(row)
         rn = ws2.max_row
-        color_map = {
-            '📦 开启商品同步': 'FFF2CC',         # 暖黄色高亮
-            '🚀 自动铺货(新品预售)': 'DAEFCE',    # 清新浅绿
-            '🌟 大货新品到仓(待上架)': 'E2EFDA',   # 柔和浅青绿
-            '❓ 异常新品到仓(商品表未录)': 'F4CCCC', # 醒目浅红警告
-            '开启商品同步': 'FFF2CC',
-            '自动铺货': 'DAEFCE',
-            '新款待上架': 'F4CCCC'
-        }
-        fill_color = color_map.get(remark, 'FFFFFF')
+        
+        fill_color = 'FFFFFF'
+        if '🟢' in remark or '翻单大货到齐' in remark:
+            fill_color = 'DAEFCE'  # 清新浅绿
+        elif '🟡' in remark or '翻单分批先到' in remark:
+            fill_color = 'FFF2CC'  # 暖黄色高亮
+        elif '🌟' in remark or '大货新品' in remark:
+            fill_color = 'E2EFDA'  # 柔和浅青绿
+        elif '🔵' in remark or '批量到货' in remark:
+            fill_color = 'D9E1F2'  # 柔和淡紫蓝
+        elif '❓' in remark or '异常' in remark:
+            fill_color = 'F4CCCC'  # 醒目浅红警告
+            
         for ci in range(1, len(headers2) + 1):
             cell = ws2.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw2 = [10, 14, 10, 10, 10, 10, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 26, 14, 16]
+    cw2 = [10, 14, 10, 10, 10, 10, 10, 12, 12, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 32, 14, 16]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
     ws2.auto_filter.ref = f"A1:{get_column_letter(ws2.max_column)}{ws2.max_row}"
 
     # 绘制 Sheet2 右侧告示区
-    draw_legend_box(ws2, 26, [
-        ('FFF2CC', '🟡 📦 开启商品同步', '最高优先级！需立即去 JEOMS / 千牛后台开启自动上传同步'),
-        ('E2EFDA', '🟢 🌟 大货新品到仓(待上架)', '仓库已实际扫码入库的大货新品，准备安排商品上架'),
-        ('DAEFCE', '🌿 🚀 自动铺货(新品预售)', '新品预售商品到仓回补'),
-        ('F4CCCC', '🔴 ❓ 异常新品到仓', '扫码入库但商品表中尚未查到信息的异常款，需运营核对')
+    draw_legend_box(ws2, 29, [
+        ('DAEFCE', '🟢 翻单大货到齐', '实到件数达到翻单量的 60% 以上，货量充足，建议立即开启商品同步'),
+        ('FFF2CC', '🟡 翻单分批先到', '工厂首批部分到货(达成率 20%~60%)，建议限额或酌情开启同步'),
+        ('E2EFDA', '🌿 🌟 大货新品到仓', '生产总表大货首单实物到仓，准备安排商品建档上架'),
+        ('D9E1F2', '🔵 批量到货待核', '大批量入库(≥30件)但未查到明确翻单，提示运营与仓库核对后开启'),
+        ('F4CCCC', '🔴 ❓ 异常批量到仓', '扫码入库但商品表中尚未查到信息的异常款，需供应链核对')
     ], title="🎨 铺货与商品同步告示板")
 
     # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
