@@ -317,10 +317,10 @@ def _extract_wh_timestamp_str(fpath):
     if m8: return m8.group(1) + '000000'
     return str(int(os.path.getmtime(fpath)))
 
-def build_inventory_timeline(wh_files, max_snapshots=6):
+def build_inventory_timeline(wh_files, max_snapshots=18):
     """
     构建最近 max_snapshots 个快照的时间序列矩阵: [(dt_obj, {skc: stock_qty})]
-    优先利用本地持久化缓存，避免重复开销
+    覆盖过去 25~30 天出货核验窗口，优先利用本地持久化缓存，避免重复开销
     """
     timeline_cache = load_timeline_cache()
     sorted_files = sorted(wh_files, key=_extract_wh_timestamp_str)
@@ -426,7 +426,9 @@ def check_restock_inbound_status(snapshots, skc, shipped_val, total_qty_val, shi
     pos_inbound = 0.0
     start_check_dt = datetime.combine(ref_ship_d - timedelta(days=1), datetime.min.time()) if ref_ship_d else (datetime.combine(today_date, datetime.min.time()) - timedelta(days=7))
     
+    latest_stk_val = 0.0
     if snapshots:
+        latest_stk_val = snapshots[-1][1].get(skc, 0.0)
         for i in range(1, len(snapshots)):
             prev_dt, prev_st = snapshots[i-1]
             cur_dt, cur_st = snapshots[i]
@@ -439,8 +441,20 @@ def check_restock_inbound_status(snapshots, skc, shipped_val, total_qty_val, shi
                     
     thresh = min(25.0, 0.35 * shipped_val) if (shipped_val and shipped_val > 0) else 25.0
     
+    # 判定入库状态：
+    # 路径A（主判）：快照监测到足额正向入库突增增量 (pos_inbound >= thresh)
+    # 路径B（兜底）：总表已明确出清(清/完/是)，实际出厂距今已>=4天，且当前仓库物理库存存在可观存量(>=15件且>=25%出货量)
+    is_inbound_confirmed = False
     if pos_inbound >= thresh:
-        # 监测到匹配数量的正向增量 -> 已准确入库！
+        is_inbound_confirmed = True
+    elif is_shipped_clean_raw and ref_ship_d and (today_date - ref_ship_d).days >= 4:
+        min_required_stock = max(15.0, 0.25 * (shipped_val or 50.0))
+        if latest_stk_val >= min_required_stock:
+            is_inbound_confirmed = True
+            pos_inbound = max(pos_inbound, shipped_val or latest_stk_val)
+
+    if is_inbound_confirmed:
+        # 监测到匹配数量的正向增量或总表出清+现实库存自证 -> 已准确入库！
         eff_dt = ship_date or plan_date
         desc = f"✅ 已准确入库(+{int(pos_inbound)}件)"
         return 'ARRIVED', eff_dt, desc, True
@@ -1530,7 +1544,7 @@ def analyze():
         prev_neg_total, prev_neg_size, _, _, prev_tw011_avail, prev_tw011_stock, _, _ = load_warehouse(prev_wh_file)
 
     # ── 构建仓库物理库存时间序列（用于翻单动态入库与在途判定）──
-    wh_snapshots_timeline = build_inventory_timeline(valid_wh_files, max_snapshots=6)
+    wh_snapshots_timeline = build_inventory_timeline(valid_wh_files, max_snapshots=18)
     logger.info("已加载 %d 个历史仓库快照构建物理库存动态监测矩阵", len(wh_snapshots_timeline))
 
     product_table = load_product_table(paths.get('product_table'))
