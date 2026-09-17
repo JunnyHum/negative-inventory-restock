@@ -137,21 +137,137 @@ def parse_spec_new(spec):
     size_name = SIZE_LAST_MAP.get(size_last, None)
     return code, color, size_name
 
-def parse_size_name_from_text(size_text):
-    """从 S(165/78A) 或 S 或 均码 等文本提取尺码名"""
+# 赠品及通用标准中文色号代码权威映射字典（参考 product-coding-standards/SKILL.md）
+GIFT_COLOR_FALLBACK = {
+    '金色': '11', '金': '11',
+    '银色': '01', '银': '01',
+    '透明': '00',
+    '黑色': '79', '黑': '79',
+    '本白': '03', '白': '03',
+    '米白': '02',
+    '奶白': '04',
+    '灰白': '05',
+    '杏色': '06',
+    '卡其': '07',
+    '沙色': '08',
+    '棕色': '74', '棕': '74',
+    '大红': '62', '红': '62',
+    '浅灰': '21',
+    '灰色': '22', '灰': '22',
+    '深灰': '24',
+    '绿色': '33', '绿': '33',
+    '湖蓝': '41',
+    '藏青': '48',
+    '黄色': '12', '黄': '12',
+    '玫红': '69',
+    '花色': '92',
+}
+
+def is_gift_code(code: str, name_or_desc: str = '') -> bool:
+    """
+    根据《SPRAYGROUND & TRENTA 商品编码规范》判定是否为赠品款：
+    1. 款号第 5~6 位类别码为 '00' (00样品/辅料，官方权威赠品类别)
+       例如: WE200006(金钞), WE100006(项链), WE120002(帽子), WD900009(项链),
+             WE200001(挂件), WE200002(手持风扇), WE200005(手机支架)
+    2. 常年款衍生实体品类 (季节码为 '0'，类别码为 '54'单肩包/'55'手提包/'98'徽章)
+       例如: WE205502(常年手提包赠品)
+    3. 辅料/包装前缀代码 (如 BG、FL 开头的物料/赠品)
+    4. 品名、描述中包含赠品特征关键词 ('赠品', '00样品', '礼品', '赠送', '金钞', '手持风扇', '手机支架')
+    """
+    if not code:
+        code = ''
+    c = str(code).strip().upper()
+    if len(c) >= 8 and c[0] in ['W', 'T', 'B', 'E', 'M', 'F', 'S', 'N']:
+        # 1. 类别代码为 00 (00样品/辅料/赠品通用代码)
+        if c[4:6] == '00':
+            return True
+        # 2. 常年款且为特定衍生实体小配件/包袋 (54单肩包, 55手提包, 98徽章)
+        if c[3] == '0' and c[4:6] in ['54', '55', '98']:
+            return True
+
+    # 3. 辅料前缀代码
+    if c.startswith(('BG', 'FL')):
+        return True
+
+    # 4. 品名/描述关键词
+    s = str(name_or_desc).strip()
+    if s:
+        for kw in ['赠品', '00样品', '礼品', '赠送', '金钞', '手持风扇', '手机支架', '挂件']:
+            if kw in s:
+                return True
+    return False
+
+def parse_size_name_from_text(size_text, is_gift: bool = False):
+    """从 S(165/78A) 或 S 或 均码 等文本提取尺码名，支持赠品自愈"""
     if not size_text:
-        return None
+        return '均码' if is_gift else None
     s = str(size_text).strip().upper()
-    # 均码
-    if '均码' in s or '均' in s:
+    # 均码与常见赠品单码标识
+    if any(k in s for k in ['均码', '均', 'F', 'FREE', '20', '00', 'ONESIZE', 'ONE SIZE', '无']):
         return '均码'
     # 匹配 S(165/78A) 等格式
-    m = re.match(r'^([A-Z]+)', s)
+    m = re.match(r'^([A-Z0-9]+)', s)
     if m:
         key = m.group(1)
         if key in ['XS', 'S', 'M', 'L', 'XL', '2XL', 'XXL']:
             return key if key != 'XXL' else '2XL'
+        if key in ['F', 'FREE', '20', '00']:
+            return '均码'
+    if is_gift:
+        return '均码'
     return None
+
+def resolve_color_code(pc: str, color_str: str, spec_raw: str = None, wh_color_map: dict = None) -> str:
+    """
+    通用智能自愈颜色编号解析器：
+    1. 优先正则提取 [XX] 里面的数字
+    2. 兼容尾缀两位数字色号 (如 "黑色79", "深灰24", "藏青48")
+    3. 提取条码 spec_raw (SKU/SKC) 的第 8~10 位数字
+    4. 反查全局 wh_color_map 自动补全真实颜色编号
+    5. 中文颜色标准映射 (尤其是赠品金钞、银色项链等，匹配 GIFT_COLOR_FALLBACK)
+    6. 赠品默认色号兜底为 '00'，杜绝 '?' 脏数据
+    7. 退避回退至 '?'
+    """
+    if not color_str:
+        color_str = ''
+    color_str_str = str(color_str).strip()
+    mc = re.search(r'\[(\d+)\]', color_str_str)
+    if mc:
+        return mc.group(1)
+
+    # 兼容尾缀两位数字色号 (如 "黑色79", "深灰24", "藏青48", "花灰24")
+    m_end = re.search(r'(?:0[1-9]|[1-9]\d)$', color_str_str)
+    if m_end:
+        return m_end.group(0)
+        
+    if spec_raw:
+        spec_str = str(spec_raw).strip()
+        if len(spec_str) >= 10 and spec_str[8:10].isdigit():
+            return spec_str[8:10]
+            
+    color_clean = re.sub(r'\[\d+\]', '', color_str_str).strip()
+    color_clean = re.sub(r'(?:0[1-9]|[1-9]\d)$', '', color_clean).strip()
+    if pc and color_clean and wh_color_map:
+        if (pc, color_clean) in wh_color_map:
+            return wh_color_map[(pc, color_clean)]
+        if (pc, color_str_str) in wh_color_map:
+            return wh_color_map[(pc, color_str_str)]
+        for (k_pc, k_name), k_cc in wh_color_map.items():
+            if k_pc == pc and (color_clean in k_name or k_name in color_clean):
+                return k_cc
+
+    # 标准中文色号映射补全 (优先查表)
+    if color_clean in GIFT_COLOR_FALLBACK:
+        return GIFT_COLOR_FALLBACK[color_clean]
+    for cn_k, code_v in GIFT_COLOR_FALLBACK.items():
+        if cn_k and cn_k in color_clean:
+            return code_v
+
+    # 若是赠品款，绝不返回 '?' 脏数据，默认色号取 '00'
+    if is_gift_code(pc, color_str_str):
+        return '00'
+                
+    return '?'
 
 def excel_serial_to_date(serial):
     if serial is None: return None
@@ -1239,6 +1355,7 @@ def parse_individual_restock_file(filepath):
                 continue
                 
             color = str(rd[indexes['color']]) if rd[indexes['color']] else ''
+            is_gift = is_gift_code(pc, color)
             
             # NOTE: 双重验证颜色编号 —— 两路来源互为兜底，防止遗漏
             # 来源1: 颜色字段中的 [XX] 格式编号（如 [03]本白 -> '03'）
@@ -1253,15 +1370,19 @@ def parse_individual_restock_file(filepath):
                     cc_candidates.add(spec_raw[8:10])
             # 两路都失败时，使用智能自愈补全引擎反查映射库补全
             if not cc_candidates or '?' in cc_candidates:
-                resolved_cc = resolve_color_code(pc, color)
+                spec_cand = str(rd[indexes['spec']]).strip() if (indexes.get('spec') is not None and len(rd) > indexes['spec'] and rd[indexes['spec']]) else None
+                resolved_cc = resolve_color_code(pc, color, spec_raw=spec_cand)
                 if resolved_cc != '?':
                     cc_candidates.discard('?')
                     cc_candidates.add(resolved_cc)
+                elif is_gift:
+                    cc_candidates.discard('?')
+                    cc_candidates.add('00')
                 elif not cc_candidates:
                     cc_candidates.add('?')
             
-            size_raw = rd[indexes['size']]
-            size_name = parse_size_name_from_text(size_raw)
+            size_raw = rd[indexes['size']] if indexes['size'] is not None and len(rd) > indexes['size'] else None
+            size_name = parse_size_name_from_text(size_raw, is_gift=is_gift)
             if not size_name:
                 continue
                 
@@ -1474,6 +1595,17 @@ def analyze():
             for (k_pc, k_name), k_cc in wh_color_map.items():
                 if k_pc == pc and (color_clean in k_name or k_name in color_clean):
                     return k_cc
+
+        # 5. 标准中文色号映射补全 (优先查表，金钞/银色项链等)
+        if color_clean in GIFT_COLOR_FALLBACK:
+            return GIFT_COLOR_FALLBACK[color_clean]
+        for cn_k, code_v in GIFT_COLOR_FALLBACK.items():
+            if cn_k and cn_k in color_clean:
+                return code_v
+
+        # 6. 若是赠品款，绝不返回 '?' 脏数据，默认色号取 '00'
+        if is_gift_code(pc, color_str_str):
+            return '00'
                     
         return '?'
 
@@ -1716,7 +1848,11 @@ def analyze():
                         row_sizes[sz] = val
                         row_sizes_sum += val
                         
-                    if total_qty_val > 0:
+                    if is_gift_code(pc, color):
+                        # 赠品款统一归入均码
+                        row_sizes = {k: 0.0 for k in SIZE_KEYS}
+                        row_sizes['均码'] = total_qty_val if total_qty_val > 0 else row_sizes_sum
+                    elif total_qty_val > 0:
                         if abs(row_sizes_sum - total_qty_val) > 1.0:
                             if row_sizes_sum > 0:
                                 # 按各码现有的比例分摊
@@ -1874,10 +2010,13 @@ def analyze():
                     all_restock[key]['is_master'] = True
                     all_restock[key]['source'] = ''
                     
-                for sz, idx in nba_indexes['sizes'].items():
-                    if idx is not None and len(rd) > idx:
-                        val = rd[idx]
-                        all_restock[key]['sizes'][sz] += val if isinstance(val, (int, float)) else 0
+                if is_gift_code(pc, color):
+                    all_restock[key]['sizes']['均码'] += total_qty_nba
+                else:
+                    for sz, idx in nba_indexes['sizes'].items():
+                        if idx is not None and len(rd) > idx:
+                            val = rd[idx]
+                            all_restock[key]['sizes'][sz] += val if isinstance(val, (int, float)) else 0
                         
                 all_restock[key]['status'] = status_desc
                 all_restock[key]['is_cleared'] = is_cleared
@@ -2464,10 +2603,33 @@ def analyze():
                     break
         tag_str = "".join(label_parts) if label_parts else "散表"
 
-        # 客服专用参考：只要在统一窗口期内
+        is_gift = is_gift_code(skc[:8], d.get('color', ''))
+
+        # 赠品活跃判定：未出清，或者交期在今天前30天至今后的任意时间（排除了早已完全出清的远古老单）
+        is_active_gift = False
+        if is_gift:
+            if not d.get('is_cleared', False):
+                is_active_gift = True
+            elif actual_date and actual_date >= (today - timedelta(days=30)):
+                is_active_gift = True
+
+        # 客服专用参考：
+        # 1. 常规款：只要在统一窗口期内且非未确认旧散表
+        # 2. 赠品款：只要属于活跃翻单，放宽30天狭窄窗口期限制，100% 全量收录进客服表！
+        should_include_customer = False
         if not is_unconfirmed_old and window_start <= actual_date <= window_end:
+            should_include_customer = True
+        elif is_active_gift:
+            should_include_customer = True
+
+        if should_include_customer:
             d_cust = dict(d)
             d_cust['color'] = wh_colors_txt.get(skc, d.get('color', ''))
+            if is_gift:
+                d_cust['is_gift'] = True
+                st_orig = str(d_cust.get('status', '') or '')
+                if '🎁' not in st_orig:
+                    d_cust['status'] = f"🎁 赠品 | {st_orig}" if st_orig else "🎁 赠品"
             if d.get('is_omitted_from_master', False):
                 if not is_master_updated:
                     d_cust['status'] = f"⚠️大货总表未更新待登记({tag_str})"
@@ -2623,6 +2785,9 @@ def analyze():
         pc = skc[:8]
         if pc in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
             continue
+        # 赠品豁免：根据官方编码规范，样品/辅料/赠品按规范本来就不在正价商品表建档，彻底消除误报
+        if is_gift_code(pc, d.get('color', '')):
+            continue
         if pc not in product_table:
             audit_key = (pc, 'NOT_IN_PRODUCT_TABLE')
             if audit_key not in seen_audit_keys:
@@ -2644,6 +2809,8 @@ def analyze():
         if '异常新品到仓' in d2.get('备注', ''):
             skc = d2['skc']
             pc = skc[:8]
+            if is_gift_code(pc, d2.get('color', '')):
+                continue
             audit_key = (skc, 'WH_STOCK_NOT_IN_PRODUCT_TABLE')
             if audit_key not in seen_audit_keys:
                 seen_audit_keys.add(audit_key)
@@ -2963,6 +3130,9 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         wh_total  = wh_neg_total.get(skc, 0)
         wh_sizes = wh_neg_size.get(skc, {k: 0 for k in SIZE_KEYS})
         wh_color = wh_colors_txt.get(skc, d.get('color', ''))
+        if d.get('is_gift') or is_gift_code(skc[:8], wh_color):
+            if '赠品' not in wh_color:
+                wh_color = f"[赠品]{wh_color}" if wh_color else "[赠品]"
 
         row = [
             skc[:8], skc, wh_color,
@@ -3002,7 +3172,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货'),
         ('BDD7EE', '🚚 生产在途', '工厂已完工出货，正在物流在途或待仓库扫码上架，预计1~2天内到仓即发'),
         ('D9E1F2', '🏭 生产制造', '工厂正常排单生产中，请参考表格预计到货日期向顾客说明发货期'),
-        ('C6EFCE', '✅ 已入库', '大货实物已进仓扫码，正在按订单顺序排单打包发出')
+        ('C6EFCE', '✅ 已入库', '大货实物已进仓扫码，正在按订单顺序排单打包发出'),
+        ('FFF2CC', '🎁 赠品参考', '活动礼品/赠品专供，可参考预计到货期向买家答复赠送安排')
     ], title="🎨 客服查货与生产状态指引告示区")
 
     # ── Sheet5: 疑似错误_待核对 ─────────────────────────────────────
