@@ -2412,87 +2412,126 @@ def analyze():
                     channel_str = ' / '.join(set([r.get('channel') for r in code_db_recs if r.get('channel')]))
 
                 is_in_product_table = (code in product_table)
+                is_in_product_table = (code in product_table)
                 match_ratio = (inbound_delta / target_order_qty) if target_order_qty > 0 else 0.0
                 
-                remark = ''
-                status_priority = 99
-                
-                if is_in_product_table:
-                    # ── 分支 1：本店铺在售款（建档在《SG网红店商品表.xlsx》） ──
-                    if target_order_qty >= 10:
-                        # 场景 1.1：翻单大货足额到齐（达成率 >= 60%）
-                        if match_ratio >= 0.60:
-                            pct_str = f"{int(match_ratio * 100)}%"
-                            remark = f"🟢 翻单大货到齐(翻单{target_order_qty}件/实到{int(inbound_delta)}件, 达成率{pct_str}) ➔ 建议开启同步"
-                            status_priority = 1
-                        # 场景 1.2：翻单分批先到（达成率 20%~60% 且实到 >= 15件）
-                        elif match_ratio >= 0.20 and inbound_delta >= 15.0:
-                            pct_str = f"{int(match_ratio * 100)}%"
-                            remark = f"🟡 翻单分批先到(翻单{target_order_qty}件/先到{int(inbound_delta)}件, 达成率{pct_str}) ➔ 酌情/限额开启同步"
-                            status_priority = 2
-                        else:
-                            # 翻单量很大但入库极少（零星散件），不触发开启同步
-                            continue
+                color_txt = wh_colors_txt.get(skc, '')
+                is_gift = is_gift_code(code, color_txt)
+                is_nba = code.startswith('NE') or ('NBA' in source_str.upper()) or ('NBA' in extra_rem_str.upper())
+                exclusive_text = f"{channel_str} {extra_rem_str}"
+                is_exclusive = any(kw in exclusive_text.lower() for kw in ['限定', '买断', '摆摊', '得物', '天猫', '线下', '微商城', '唯品会', 'c2', '企业店'])
+                is_first_order = ('首单' in order_type_str) or ('首批' in order_type_str)
+                is_restock_order = any(kw in order_type_str for kw in ['翻', '翻1', '翻2', '翻3', '翻4', '翻5', '翻单'])
+
+                # ── 维度一：库存变动与翻单表数量匹配联动提示（到货达成状态） ──────────────────
+                order_kind_txt = '首单' if is_first_order else '翻单'
+                if target_order_qty >= 10:
+                    pct_str = f"{int(match_ratio * 100)}%"
+                    if match_ratio >= 0.60:
+                        qty_match_tag = f"🟢 {order_kind_txt}大货到齐 ({pct_str})"
+                        qty_match_desc = f"🟢 {order_kind_txt}大货到齐({order_kind_txt}{target_order_qty}件/实到{int(inbound_delta)}件, 达成率{pct_str})"
+                        match_level = 1
+                    elif match_ratio >= 0.20 and inbound_delta >= 15.0:
+                        qty_match_tag = f"🟡 {order_kind_txt}分批先到 ({pct_str})"
+                        qty_match_desc = f"🟡 {order_kind_txt}分批先到({order_kind_txt}{target_order_qty}件/先到{int(inbound_delta)}件, 达成率{pct_str})"
+                        match_level = 2
                     else:
-                        # 场景 1.3：无明确翻单的大批量到仓（实到 >= 30件）
-                        if inbound_delta >= 30.0:
-                            remark = f"🔵 批量到货入库(实到{int(inbound_delta)}件/无明确翻单) ➔ 运营核实后开启"
-                            status_priority = 3
-                        else:
-                            # 10~29 件散件，不干扰运营
-                            continue
+                        qty_match_tag = f"⚪ {order_kind_txt}零星先到 ({pct_str})"
+                        qty_match_desc = f"⚪ {order_kind_txt}零星先到({order_kind_txt}{target_order_qty}件/先到{int(inbound_delta)}件, 达成率{pct_str})"
+                        match_level = 3
                 else:
-                    # ── 分支 2：非本店铺在售款（商品表未收录，绝不发开启同步指令，精细分类标注） ──
-                    color_txt = wh_colors_txt.get(skc, '')
-                    is_gift = is_gift_code(code, color_txt)
-                    is_nba = code.startswith('NE') or ('NBA' in source_str.upper()) or ('NBA' in extra_rem_str.upper())
-                    exclusive_text = f"{channel_str} {extra_rem_str}"
-                    is_exclusive = any(kw in exclusive_text.lower() for kw in ['限定', '买断', '摆摊', '得物', '天猫', '线下', '微商城', '唯品会', 'c2', '企业店'])
-                    is_first_order = ('首单' in order_type_str) or ('首批' in order_type_str)
-                    is_restock_order = any(kw in order_type_str for kw in ['翻', '翻1', '翻2', '翻3', '翻4', '翻5', '翻单'])
-                    
-                    if is_gift:
-                        # 场景 2.1：赠品款到仓
-                        remark = f"🎁 赠品批量到仓(实到{int(inbound_delta)}件) ➔ 客服/赠品备货"
-                        status_priority = 7
-                    elif is_nba or is_exclusive:
-                        # 场景 2.2：专供 / 其他店铺在售款到仓（NBA、得物、天猫、线下、买断限定等）
-                        exclusive_tags = []
-                        if is_nba: exclusive_tags.append("NBA联名")
-                        if '限定' in extra_rem_str:
-                            m_lim = re.search(r'([\u4e00-\u9fa5A-Za-z0-9]+限定)', extra_rem_str)
-                            exclusive_tags.append(m_lim.group(1) if m_lim else "限定款")
-                        if any(kw in extra_rem_str for kw in ['买断', '摆摊']):
-                            exclusive_tags.append("买断/摆摊")
-                        if '得物' in (channel_str + extra_rem_str): exclusive_tags.append("得物专供")
-                        if '天猫' in (channel_str + extra_rem_str): exclusive_tags.append("天猫专供")
-                        if '线下' in (channel_str + extra_rem_str): exclusive_tags.append("线下专供")
-                        tag_str = f"[{'/'.join(exclusive_tags)}]" if exclusive_tags else ""
-                        
-                        qty_str = f"(首单{target_order_qty}件/实到{int(inbound_delta)}件)" if (target_order_qty > 0 and is_first_order) else f"(实到{int(inbound_delta)}件)"
-                        remark = f"🟣 专供/其他店铺款到仓{tag_str}{qty_str} ➔ 关注分流/非本店在售"
-                        status_priority = 4
-                    elif is_first_order or (code in master_progress_codes or skc in master_progress_skcs or skc in skc_has_any):
-                        # 场景 2.3：首单新品 / 大货到仓（未在商品表录入）
-                        if is_first_order:
-                            qty_str = f"(首单{target_order_qty}件/实到{int(inbound_delta)}件)" if target_order_qty > 0 else f"(实到{int(inbound_delta)}件)"
-                            remark = f"🌟 首单新品到仓{qty_str} ➔ 待建档上架"
-                            status_priority = 5
-                        elif is_restock_order:
-                            remark = f"⚠️ 翻单到仓(商品表未录, 实到{int(inbound_delta)}件) ➔ 待核实建档"
-                            status_priority = 6
-                        else:
-                            remark = f"🌟 大货新品到仓(实到{int(inbound_delta)}件) ➔ 待建档上架"
-                            status_priority = 5
+                    if inbound_delta >= 30.0:
+                        qty_match_tag = "🔵 批量入库(无翻单)"
+                        qty_match_desc = f"🔵 批量到货入库(实到{int(inbound_delta)}件/无明确翻单)"
+                        match_level = 4
                     else:
-                        # 场景 2.4：异常到仓（生产总表查无记录且商品表未录入）
-                        if inbound_delta >= 30.0:
-                            remark = f"❓ 异常批量到仓(实到{int(inbound_delta)}件/商品表未录) ➔ 待供应链核对"
-                            status_priority = 8
-                        else:
-                            remark = f"❓ 零散到仓(实到{int(inbound_delta)}件/商品表未录) ➔ 待供应链核对"
-                            status_priority = 9
-                        
+                        qty_match_tag = "⚪ 零散入库(无翻单)"
+                        qty_match_desc = f"⚪ 零散到货入库(实到{int(inbound_delta)}件/无明确翻单)"
+                        match_level = 5
+
+                # ── 维度二：款式是否在商品表与渠道逻辑提示 ─────────────────────────────
+                exclusive_tags = []
+                if is_nba: exclusive_tags.append("NBA联名")
+                if '限定' in extra_rem_str:
+                    m_lim = re.search(r'([\u4e00-\u9fa5A-Za-z0-9]+限定)', extra_rem_str)
+                    exclusive_tags.append(m_lim.group(1) if m_lim else "限定款")
+                if any(kw in extra_rem_str for kw in ['买断', '摆摊']):
+                    exclusive_tags.append("买断/摆摊")
+                if '得物' in (channel_str + extra_rem_str): exclusive_tags.append("得物专供")
+                if '天猫' in (channel_str + extra_rem_str): exclusive_tags.append("天猫专供")
+                if '线下' in (channel_str + extra_rem_str): exclusive_tags.append("线下专供")
+                detail_tag = '/'.join(exclusive_tags)
+
+                if is_in_product_table:
+                    shop_status_tag = "✅ 本店在售"
+                    shop_type = "on_sale"
+                elif is_gift:
+                    shop_status_tag = "🎁 本店未录(赠品款)"
+                    shop_type = "gift"
+                elif is_nba or is_exclusive:
+                    tag_suffix = f"[{detail_tag}]" if detail_tag else ""
+                    shop_status_tag = f"🟣 非本店在售{tag_suffix}"
+                    shop_type = "exclusive"
+                elif is_first_order or (code in master_progress_codes or skc in master_progress_skcs or skc in skc_has_any):
+                    if is_first_order:
+                        shop_status_tag = "🆕 本店未录(首单新品)"
+                        shop_type = "new_arrival"
+                    elif is_restock_order:
+                        shop_status_tag = "⚠️ 本店未录(翻单款待核)"
+                        shop_type = "unlisted_restock"
+                    else:
+                        shop_status_tag = "🆕 本店未录(大货新品)"
+                        shop_type = "new_arrival"
+                else:
+                    shop_status_tag = "❓ 本店未录(异常款)"
+                    shop_type = "unknown"
+
+                # ── 综合联动推导：运营行动指令与处理优先级 ─────────────────────────────
+                if shop_type == "on_sale":
+                    if match_level == 1:
+                        action_text = "建议开启同步"
+                        status_priority = 1
+                    elif match_level == 2:
+                        action_text = "酌情/限额开启同步"
+                        status_priority = 2
+                    elif match_level == 3:
+                        action_text = "暂缓同步(先到量过少)"
+                        status_priority = 7
+                    elif match_level == 4:
+                        action_text = "运营核实后开启"
+                        status_priority = 3
+                    else:
+                        action_text = "散件入库(暂不开启)"
+                        status_priority = 8
+                elif shop_type == "new_arrival":
+                    if match_level == 1:
+                        action_text = "大货到齐/待建档上架"
+                        status_priority = 4
+                    elif match_level == 2:
+                        action_text = "首批先到/准备建档"
+                        status_priority = 5
+                    elif match_level == 3:
+                        action_text = "零星先到/暂缓上架"
+                        status_priority = 9
+                    else:
+                        action_text = "大货到仓/待建档上架"
+                        status_priority = 5
+                elif shop_type == "exclusive":
+                    action_text = "关注分流/非本店在售"
+                    status_priority = 6
+                elif shop_type == "unlisted_restock":
+                    action_text = "待核实建档(本店漏录或专供)"
+                    status_priority = 10
+                elif shop_type == "gift":
+                    action_text = "客服/赠品备货(无需上架)"
+                    status_priority = 11
+                else:
+                    action_text = "待供应链核对"
+                    status_priority = 12
+
+                # 完整两段式运营指令：【数量匹配描述】 ｜ [商品表状态] ➔ 行动指令
+                full_remark = f"{qty_match_desc} ｜ [{shop_status_tag}] ➔ {action_text}"
+
                 sheet2_data.append({
                     'skc': skc,
                     'color': wh_colors_txt.get(skc, ''),
@@ -2501,9 +2540,12 @@ def analyze():
                     'inbound_delta': inbound_delta,
                     'target_order_qty': target_order_qty,
                     'match_ratio': match_ratio,
+                    'qty_match_tag': qty_match_tag,     # 维度一独立列
+                    'shop_status_tag': shop_status_tag, # 维度二独立列
                     'prev_sizes': prev_sizes,
                     'cur_sizes':  cur_sizes,
-                    '备注': remark,
+                    '备注': full_remark,                 # 综合指令列
+                    'action_text': action_text,
                     'priority': status_priority,
                 })
     logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
@@ -3125,6 +3167,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     headers2 = ['款号', 'SKC', '颜色',
                  '当前可销', '当前实体', '前表可销',
                  '恢复净增', '对应翻单数', '到货达成率',
+                 '数量匹配提示', '商品表状态',
                  'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
                  '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后',
                  '运营操作指令', '同链接主款', '商品ID']
@@ -3157,6 +3200,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(d2['cur_total'], 0), round(entity, 0),
             round(d2['prev_total'], 0),
             round(inbound_d, 0), target_str, ratio_str,
+            d2.get('qty_match_tag', ''),
+            d2.get('shop_status_tag', ''),
             round(prev_sizes.get('XS', 0), 0), round(prev_sizes.get('S', 0), 0),
             round(prev_sizes.get('M', 0), 0),   round(prev_sizes.get('L', 0), 0),
             round(prev_sizes.get('XL', 0), 0),  round(prev_sizes.get('2XL', 0), 0),
@@ -3174,21 +3219,23 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         rn = ws2.max_row
         
         fill_color = 'FFFFFF'
-        if '🟢' in remark or '翻单大货到齐' in remark:
-            fill_color = 'DAEFCE'  # 清新浅绿
-        elif '🟡' in remark or '翻单分批先到' in remark:
-            fill_color = 'FFF2CC'  # 暖黄色高亮
-        elif '🌟' in remark or '首单新品' in remark or '大货新品' in remark:
+        if '🟢' in remark and '建议开启' in remark:
+            fill_color = 'DAEFCE'  # 清新浅绿（本店在售足额到齐）
+        elif '🟡' in remark and '限额开启' in remark:
+            fill_color = 'FFF2CC'  # 暖黄色高亮（本店在售分批先到）
+        elif '🌟' in remark or '待建档上架' in remark or '首单新品' in remark:
             fill_color = 'E2EFDA'  # 柔和浅青绿（新品待建档）
-        elif '🟣' in remark or '专供' in remark or '其他店铺' in remark:
-            fill_color = 'E8D7F1'  # 雅致浅紫（专供/其他店铺款）
-        elif '⚠️' in remark or '商品表未录' in remark:
+        elif '🟣' in remark or '非本店在售' in remark:
+            fill_color = 'E8D7F1'  # 雅致浅紫（专供款/非本店在售）
+        elif '⚠️' in remark or '待核实建档' in remark:
             fill_color = 'FCE5CD'  # 柔和浅橙（翻单待核实）
         elif '🎁' in remark or '赠品' in remark:
             fill_color = 'FFF2CC'  # 暖黄赠品色
-        elif '🔵' in remark or '批量到货' in remark:
+        elif '🔵' in remark or '运营核实后开启' in remark:
             fill_color = 'D9E1F2'  # 柔和淡紫蓝
-        elif '❓' in remark or '异常' in remark or '零散到仓' in remark:
+        elif '⚪' in remark or '暂缓' in remark or '零星' in remark:
+            fill_color = 'F2F2F2'  # 浅灰（零星到货/暂缓操作）
+        elif '❓' in remark or '待供应链核对' in remark:
             fill_color = 'F4CCCC'  # 醒目浅红警告
             
         for ci in range(1, len(headers2) + 1):
@@ -3197,22 +3244,23 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw2 = [10, 14, 10, 10, 10, 10, 10, 12, 12, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 32, 14, 16]
+    cw2 = [10, 14, 10, 10, 10, 10, 10, 12, 12, 18, 22, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 45, 14, 16]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
     ws2.auto_filter.ref = f"A1:{get_column_letter(ws2.max_column)}{ws2.max_row}"
 
     # 绘制 Sheet2 右侧告示区
-    draw_legend_box(ws2, 29, [
-        ('DAEFCE', '🟢 翻单大货到齐', '本店在售款，实到达成率 ≥60%，货量充足，建议立即开启商品同步'),
-        ('FFF2CC', '🟡 翻单分批先到', '本店在售款，工厂首批部分到货(达成率 20%~60%)，建议限额或酌情开启同步'),
-        ('D9E1F2', '🔵 批量到货待核', '本店在售款，大批量入库(≥30件)但无明确翻单，提示运营核对后开启'),
-        ('E2EFDA', '🌟 首单新品到仓', '生产总表首单大货实物到仓，但本店尚未建档录入，提示运营安排商品建档上架'),
-        ('E8D7F1', '🟣 专供/其他店铺款', 'NBA联名/专供/线下买断等其他店铺在售款，非本店在售，关注货品分流'),
-        ('FCE5CD', '⚠️ 翻单未录到仓', '生产总表有翻单但本店商品表未录，提示供应链与运营核实是否为其他店铺款或漏建档'),
-        ('FFF2CC', '🎁 赠品批量到仓', '赠品类款号批量到仓，提示客服与仓管备货，无需在店铺上架开启同步'),
-        ('F4CCCC', '🔴 ❓ 异常/零散到仓', '扫码入库但商品表与生产总表均无明确记录的款式，需供应链核对')
+    draw_legend_box(ws2, 31, [
+        ('DAEFCE', '🟢 建议开启同步', '【本店在售】且【翻单/首单大货到齐(≥60%)】，货量充沛，立即开启商品同步'),
+        ('FFF2CC', '🟡 酌情/限额开启', '【本店在售】且【分批部分先到(20%~60%)】，建议限额或酌情开启同步'),
+        ('E2EFDA', '🌟 新品待建档上架', '【本店未录/首单新品】实物大货到仓，提示运营录入主商品表并建档上架'),
+        ('E8D7F1', '🟣 非本店在售/分流', '【非本店专供】NBA联名/澳门限定/买断摆摊等专供款式，关注分流，不开启同步'),
+        ('FCE5CD', '⚠️ 翻单待核实建档', '【本店未录/翻单款】生产总表有翻单但本店未录，核实是否为其他店铺款或漏建档'),
+        ('FFF2CC', '🎁 赠品备货', '【赠品款号】赠品批量到仓，提示客服与仓管备货，无需在店铺上架'),
+        ('D9E1F2', '🔵 批量入库待核', '【本店在售】大批量入库(≥30件)但无明确翻单，提示运营与仓库核实后开启'),
+        ('F2F2F2', '⚪ 零星散件暂缓', '翻单或首单零星先到(达成率<20%或<15件)，到货量过少，暂缓开启同步或上架'),
+        ('F4CCCC', '🔴 ❓ 异常到仓待核', '扫码入库但商品表与生产总表均无记录的款式，需供应链核对')
     ], title="🎨 铺货与商品同步告示板")
 
     # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
