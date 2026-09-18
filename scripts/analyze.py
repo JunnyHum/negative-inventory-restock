@@ -2299,6 +2299,10 @@ def analyze():
             code = skc[:8]
             if code in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
                 continue
+            # 严格防线：必须在店铺主商品表《SG网红店商品表.xlsx》中建档登记（与 Sheet 1 保持 100% 绝对一致）
+            # 坚决排除非本店铺在售款式或尚未建档上架的新品，避免对非本店商品发出虚假的开启同步指令
+            if code not in product_table:
+                continue
             is_junma = product_is_junma.get(code, False)
             
             # 判断前一次与本次是否实际有库存（独享仓最高优先级）
