@@ -198,21 +198,28 @@ def is_gift_code(code: str, name_or_desc: str = '') -> bool:
     return False
 
 def parse_size_name_from_text(size_text, is_gift: bool = False):
-    """从 S(165/78A) 或 S 或 均码 等文本提取尺码名，支持赠品自愈"""
+    """从 S(165/78A) 或 S 或 XXL(185/100A) 或 均码 等文本提取尺码名，支持赠品自愈"""
     if not size_text:
         return '均码' if is_gift else None
     s = str(size_text).strip().upper()
-    # 均码与常见赠品单码标识
-    if any(k in s for k in ['均码', '均', 'F', 'FREE', '20', '00', 'ONESIZE', 'ONE SIZE', '无']):
-        return '均码'
-    # 匹配 S(165/78A) 等格式
+
+    # 1. 优先匹配标准服装尺码前缀 (解决 XXL(185/100A) 中 100A 包含 '00' 导致被误判为均码的致命缺陷)
     m = re.match(r'^([A-Z0-9]+)', s)
     if m:
         key = m.group(1)
         if key in ['XS', 'S', 'M', 'L', 'XL', '2XL', 'XXL']:
-            return key if key != 'XXL' else '2XL'
-        if key in ['F', 'FREE', '20', '00']:
+            return '2XL' if key == 'XXL' else key
+        if key in ['3XL', 'XXXL']:
+            return '2XL'
+        if key in ['F', 'FREE']:
             return '均码'
+
+    # 2. 均码与单码特征判定 (安全排除 100A, 120A 等号型数字子串)
+    if '均' in s or 'ONESIZE' in s or 'ONE SIZE' in s:
+        return '均码'
+    if s in ['20', '00', '无', '/']:
+        return '均码'
+
     if is_gift:
         return '均码'
     return None
