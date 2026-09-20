@@ -840,6 +840,24 @@ def load_product_table(filepath):
         logger.warning("加载店铺商品表失败: %s", e)
         return {}
 
+def get_link_details(code, product_table=None):
+    """
+    若为同链接衍生款/加棉款，返回 (主款号, 商品ID)；
+    若为主款或独立款，返回 ('', '')。
+    """
+    if not product_table or code not in product_table:
+        return '', ''
+    info = product_table[code]
+    if not info.get('isPrimary', True):
+        main_c = info.get('mainCode', '')
+        item_id = str(info.get('itemId', '')).strip()
+        if item_id == 'None':
+            item_id = ''
+        elif item_id.endswith('.0'):
+            item_id = item_id[:-2]
+        return main_c, item_id
+    return '', ''
+
 # ── 生意参谋 ─────────────────────────────────────────────────────────────────
 def resolveBizDir(config: dict) -> str:
     """
@@ -2550,6 +2568,171 @@ def analyze():
                 })
     logger.info("库存回补（Sheet2）: %d条", len(sheet2_data))
 
+    # 提前加载生意参谋数据（供 Sheet 3 及后续评分使用）
+    biz_dir_resolved = resolveBizDir(config)
+    biz_data = load_business_data(biz_dir_resolved, pats['biz_advisor'])
+
+    # ── 3.9 款号统筹库存急剧减少筛选引擎（生成 Sheet 3：急剧减少需翻单）──────
+    sheet3_drops_data = []
+    if prev_wh_file:
+        # 1. 款号级（8位编码）聚合当前库存与前一次库存快照
+        code_cur_avail = defaultdict(float)
+        code_prev_avail = defaultdict(float)
+        code_cur_entity = defaultdict(float)
+        code_prev_entity = defaultdict(float)
+        code_sizes_cur = defaultdict(lambda: {k: 0.0 for k in SIZE_KEYS})
+        code_colors_set = defaultdict(set)
+        code_skcs_set = defaultdict(set)
+
+        # 遍历当前库存
+        for skc, cur_tot in wh_neg_total.items():
+            code = skc[:8]
+            if code in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
+                continue
+            code_cur_avail[code] += cur_tot
+            code_cur_entity[code] += whEntityTotal.get(skc, 0.0)
+            code_skcs_set[code].add(skc)
+            c_txt = wh_colors_txt.get(skc, '')
+            if c_txt:
+                code_colors_set[code].add(c_txt)
+            szs = wh_neg_size.get(skc, {})
+            for sz_k, sz_v in szs.items():
+                if sz_k in SIZE_KEYS:
+                    code_sizes_cur[code][sz_k] += sz_v
+
+        # 遍历前次库存
+        for skc, prev_tot in prev_neg_total.items():
+            code = skc[:8]
+            if code in EXCLUDED_UNOFFICIAL_CODES or skc in EXCLUDED_UNOFFICIAL_CODES:
+                continue
+            code_prev_avail[code] += prev_tot
+            code_prev_entity[code] += prev_entity_total.get(skc, 0.0) if prev_entity_total else 0.0
+            code_skcs_set[code].add(skc)
+            c_txt = wh_colors_txt.get(skc, '')
+            if c_txt:
+                code_colors_set[code].add(c_txt)
+
+        # 2. 识别所有涉及的款号并计算整款售出量
+        all_monitored_codes = set(code_cur_avail.keys()) | set(code_prev_avail.keys())
+        for code in all_monitored_codes:
+            p_avail = code_prev_avail.get(code, 0.0)
+            c_avail = code_cur_avail.get(code, 0.0)
+            p_ent = code_prev_entity.get(code, 0.0)
+            c_ent = code_cur_entity.get(code, 0.0)
+
+            delta_avail = c_avail - p_avail
+            delta_entity = c_ent - p_ent
+            sold_qty = max(-delta_avail, -delta_entity)
+
+            # 门槛：整款单日/单周期售出减少 >= 20 件
+            if sold_qty < 20.0:
+                continue
+
+            # 3. 关联生产总表/微信翻单表，检查该款号当前是否有在途翻单
+            code_db_recs = [rec for rec in master_records_db if rec.get('code') == code]
+            active_recs = [r for r in code_db_recs if not r.get('is_cleared')]
+            
+            # 计算在途总翻单量
+            total_active_restock = 0
+            earliest_delivery = None
+            for r in active_recs:
+                q = r.get('qty', 0)
+                if isinstance(q, (int, float)) and q > 0:
+                    total_active_restock += int(q)
+                d = r.get('date')
+                if d:
+                    if earliest_delivery is None or d < earliest_delivery:
+                        earliest_delivery = d
+            
+            has_active_restock = (total_active_restock > 0)
+            delivery_str = earliest_delivery.strftime('%m-%d') if hasattr(earliest_delivery, 'strftime') else str(earliest_delivery or '')
+            
+            # 翻单在途信息描述
+            if has_active_restock:
+                restock_info_str = f"在途{total_active_restock}件({delivery_str}预计)" if delivery_str else f"在途{total_active_restock}件"
+            else:
+                restock_info_str = "无在途翻单"
+
+            # 4. 售出强度评级
+            if sold_qty >= 50.0:
+                drop_strength = f"🔥🔥 超强爆发售出({int(sold_qty)}件)"
+            else:
+                drop_strength = f"🔥 快速动销消耗({int(sold_qty)}件)"
+
+            # 5. 商品表与渠道状态（维度二）
+            is_in_pt = (code in product_table)
+            colors_list = list(code_colors_set.get(code, []))
+            colors_str = ', '.join(colors_list[:3])
+            
+            is_gift = any(is_gift_code(code, c) for c in colors_list) if colors_list else is_gift_code(code, '')
+            is_nba = code.startswith('NE') or any('NBA' in str(r.get('source', '')).upper() for r in code_db_recs)
+            is_exclusive = is_nba or any(any(kw in str(r.get('extra_remarks', '') + r.get('channel', '')) for kw in ['限定', '买断', '摆摊', '得物', '天猫', '线下']) for r in code_db_recs)
+
+            if is_in_pt:
+                shop_status = "✅ 本店在售"
+            elif is_gift:
+                shop_status = "🎁 赠品款号"
+            elif is_exclusive:
+                shop_status = "🟣 非本店专供"
+            else:
+                shop_status = "❓ 本店未录"
+
+            # 6. 库存紧缺等级与翻单决策指令
+            # 分级：深负库存(<0)、濒危(0~29)、健康(>=30)
+            if c_avail < 0:
+                if not has_active_restock:
+                    decision_instruction = f"🚨 爆单断货无翻单(现总可销{int(c_avail)}件) ➔ 紧急启动翻单跟进/评估截单"
+                    priority = 1
+                    status_level = 'danger'
+                else:
+                    decision_instruction = f"⚡ 爆单负库存在途(在途{total_active_restock}件/{delivery_str}到) ➔ 催促工厂加急交期"
+                    priority = 2
+                    status_level = 'warning_in_transit'
+            elif c_avail < 30:
+                if not has_active_restock:
+                    decision_instruction = f"⚠️ 爆单库存告急(现总可销{int(c_avail)}件) ➔ 提前备料准备翻单"
+                    priority = 3
+                    status_level = 'warning'
+                else:
+                    decision_instruction = f"🟡 爆单库存告急(现总可销{int(c_avail)}件/在途{total_active_restock}件) ➔ 关注入库交期"
+                    priority = 4
+                    status_level = 'notice'
+            else:
+                decision_instruction = f"📈 爆款正常消耗(现总可销{int(c_avail)}件充沛) ➔ 正常销售监控"
+                priority = 5
+                status_level = 'healthy'
+
+            # 7. 生意参谋流量与同链接主款
+            sc = biz_data.get(code, {})
+            main_code, item_id = get_link_details(code, product_table)
+
+            sheet3_drops_data.append({
+                'code': code,
+                'sold_qty': sold_qty,
+                'drop_strength': drop_strength,
+                'prev_avail': p_avail,
+                'cur_avail': c_avail,
+                'cur_entity': c_ent,
+                'restock_info_str': restock_info_str,
+                'has_active_restock': has_active_restock,
+                'total_active_restock': total_active_restock,
+                'decision_instruction': decision_instruction,
+                'shop_status': shop_status,
+                'colors_str': colors_str,
+                'sizes': code_sizes_cur.get(code, {k: 0.0 for k in SIZE_KEYS}),
+                'visitors': sc.get('visitors', 0),
+                'pay': sc.get('pay', 0),
+                'cart': sc.get('cart', 0),
+                'main_code': main_code,
+                'item_id': item_id,
+                'priority': priority,
+                'status_level': status_level
+            })
+
+    # 排序：先按优先级（最高危的断货无翻单排最前），同优先级按售出量降序排！
+    sheet3_drops_data.sort(key=lambda x: (x['priority'], -x['sold_qty']))
+    logger.info("款号急剧减少筛选（Sheet3）: %d条", len(sheet3_drops_data))
+
     # 跨源交叉审计：提取被两张大货进度表完全遗漏的微信活跃翻单
     # 黄金准则（严格四维匹配算法）：
     #   必须同时匹配 款号 + 颜色/编号 + 预计到货日期 + 下单数量！
@@ -3006,12 +3189,12 @@ def analyze():
 
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
            paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
-           customer_results, wh_neg_total, audit_errors
+           customer_results, wh_neg_total, audit_errors, sheet3_drops_data
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
              output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None, omitted_details=None,
-             customer_results=None, wh_neg_total=None, audit_errors=None):
+             customer_results=None, wh_neg_total=None, audit_errors=None, sheet3_drops_data=None):
     from datetime import datetime
     import re
     
@@ -3263,13 +3446,89 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('F4CCCC', '🔴 ❓ 异常到仓待核', '扫码入库但商品表与生产总表均无记录的款式，需供应链核对')
     ], title="🎨 铺货与商品同步告示板")
 
-    # ── Sheet3: 无翻单需评分 ─────────────────────────────────────────
-    ws3 = wb.create_sheet('无翻单需评分')
-    headers3 = ['款号', 'SKC', '仓库可销', '综合评分',
-                '7天访客', '7天支付', '7天加购', '翻单建议', '同链接主款', '商品ID']
+    # ── Sheet3: 急剧减少需翻单（款号统筹爆款筛选与翻单预警）─────────────────
+    ws3 = wb.create_sheet('急剧减少需翻单')
+    headers3 = [
+        '款号', '售出爆发强度', '整款售出减少', '前表总可销', '现表总可销', '现表总实体',
+        '在途翻单信息',
+        'XS现存', 'S现存', 'M现存', 'L现存', 'XL现存', '2XL现存', '均码现存',
+        '翻单跟进决策指令', '商品表状态', '主要颜色',
+        '7天访客', '7天支付', '7天加购', '同链接主款', '商品ID'
+    ]
     ws3.append(headers3)
     for ci, h in enumerate(headers3, 1):
         cell = ws3.cell(1, ci)
+        cell.fill = hf; cell.font = hfont
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = tb
+
+    for d3 in sheet3_drops_data:
+        code = d3['code']
+        szs = d3['sizes']
+        lvl = d3['status_level']
+        
+        fill_color = 'FFFFFF'
+        if lvl == 'danger':
+            fill_color = 'F4CCCC'  # 醒目浅红（断货且无翻单，最危急）
+        elif lvl == 'warning_in_transit':
+            fill_color = 'FCE5CD'  # 柔和浅橙（断货但有翻单在途，加急催交期）
+        elif lvl == 'warning':
+            fill_color = 'FFF2CC'  # 暖黄（濒危即将断货）
+        elif lvl == 'notice':
+            fill_color = 'FFF2CC'  # 暖黄
+        elif lvl == 'healthy':
+            fill_color = 'DAEFCE'  # 清新浅绿（健康爆款）
+
+        row = [
+            code,
+            d3['drop_strength'],
+            round(d3['sold_qty'], 0),
+            round(d3['prev_avail'], 0),
+            round(d3['cur_avail'], 0),
+            round(d3['cur_entity'], 0),
+            d3['restock_info_str'],
+            round(szs.get('XS', 0), 0), round(szs.get('S', 0), 0),
+            round(szs.get('M', 0), 0),  round(szs.get('L', 0), 0),
+            round(szs.get('XL', 0), 0), round(szs.get('2XL', 0), 0),
+            round(szs.get('均码', 0), 0),
+            d3['decision_instruction'],
+            d3['shop_status'],
+            d3['colors_str'],
+            d3['visitors'],
+            d3['pay'],
+            d3['cart'],
+            d3['main_code'],
+            d3['item_id'],
+        ]
+        ws3.append(row)
+        rn = ws3.max_row
+        for ci in range(1, len(headers3) + 1):
+            cell = ws3.cell(rn, ci)
+            cell.border = tb
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
+
+    cw3 = [10, 18, 12, 11, 11, 11, 18, 6, 6, 6, 6, 6, 6, 6, 42, 14, 18, 10, 10, 10, 14, 16]
+    for ci, w in enumerate(cw3, 1):
+        ws3.column_dimensions[get_column_letter(ci)].width = w
+    ws3.freeze_panes = 'A2'
+    ws3.auto_filter.ref = f"A1:{get_column_letter(ws3.max_column)}{ws3.max_row}"
+
+    # 绘制 Sheet3 右侧告示区
+    draw_legend_box(ws3, 24, [
+        ('F4CCCC', '🚨 爆单断货且无翻单', '单日整款售出暴增且现总可销已负，生产部查无翻单，最危急，紧急评估翻单补单'),
+        ('FCE5CD', '⚡ 爆单负库存在途', '整款单日爆发热销已断货，但生产部已有翻单在途，需供应链重点加急催促交期'),
+        ('FFF2CC', '⚠️ 爆单库存告急', '整款剧烈消耗且现可销濒临断货(0~29件)或单日由正转负，提示提前备料翻单'),
+        ('DAEFCE', '📈 爆款健康消耗', '整款单日售出强劲爆发，且当前整款可销库存充足(≥30件)，正常销售动销监控')
+    ], title="🎨 爆款急减与翻单决策告示板")
+
+    # ── Sheet4: 无翻单需评分 ─────────────────────────────────────────
+    ws4 = wb.create_sheet('无翻单需评分')
+    headers4 = ['款号', 'SKC', '仓库可销', '综合评分',
+                '7天访客', '7天支付', '7天加购', '翻单建议', '同链接主款', '商品ID']
+    ws4.append(headers4)
+    for ci, h in enumerate(headers4, 1):
+        cell = ws4.cell(1, ci)
         cell.fill = hf; cell.font = hfont
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
@@ -3284,34 +3543,34 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         row = [code, skc, round(qty, 0),
                str(score) if score is not None else '无数据',
                sc.get('visitors', 0), sc.get('pay', 0), sc.get('cart', 0), advice, main_code, item_id]
-        ws3.append(row)
-        rn = ws3.max_row
-        for ci in range(1, len(headers3) + 1):
-            cell = ws3.cell(rn, ci)
+        ws4.append(row)
+        rn = ws4.max_row
+        for ci in range(1, len(headers4) + 1):
+            cell = ws4.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw3 = [10, 14, 10, 10, 10, 10, 10, 16, 14, 16]
-    for ci, w in enumerate(cw3, 1):
-        ws3.column_dimensions[get_column_letter(ci)].width = w
-    ws3.freeze_panes = 'A2'
-    ws3.auto_filter.ref = f"A1:{get_column_letter(ws3.max_column)}{ws3.max_row}"
+    cw4 = [10, 14, 10, 10, 10, 10, 10, 16, 14, 16]
+    for ci, w in enumerate(cw4, 1):
+        ws4.column_dimensions[get_column_letter(ci)].width = w
+    ws4.freeze_panes = 'A2'
+    ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
 
-    # ── Sheet4: 客服专用_到货参考 ───────────────────────────────────────
+    # ── Sheet5: 客服专用_到货参考 ───────────────────────────────────────
     if customer_results is None:
         customer_results = []
     if wh_neg_total is None:
         wh_neg_total = {}
 
-    ws4 = wb.create_sheet('客服专用_到货参考')
-    headers4 = ['款号', 'SKC编码', '颜色', '仓库可销',
+    ws5 = wb.create_sheet('客服专用_到货参考')
+    headers5 = ['款号', 'SKC编码', '颜色', '仓库可销',
                  'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '批次到货数量', 'XS', 'S', 'M', 'L', 'XL', '2XL', '均码',
                  '预计到货日期', '生产状态', '工厂', '翻单数据源']
-    ws4.append(headers4)
-    for ci, h in enumerate(headers4, 1):
-        cell = ws4.cell(1, ci)
+    ws5.append(headers5)
+    for ci, h in enumerate(headers5, 1):
+        cell = ws5.cell(1, ci)
         cell.fill = hf; cell.font = hfont
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
@@ -3340,24 +3599,24 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             d.get('delivery', ''), d.get('status', ''), d.get('factory', ''),
             ('' if (d.get('is_master') or not d.get('is_omitted_from_master', False)) else d.get('source', ''))
         ]
-        ws4.append(row)
-        rn = ws4.max_row
+        ws5.append(row)
+        rn = ws5.max_row
         
         fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
-        for ci in range(1, len(headers4) + 1):
-            cell = ws4.cell(rn, ci)
+        for ci in range(1, len(headers5) + 1):
+            cell = ws5.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw4 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
-    for ci, w in enumerate(cw4, 1):
-        ws4.column_dimensions[get_column_letter(ci)].width = w
-    ws4.freeze_panes = 'A2'
-    ws4.auto_filter.ref = f"A1:{get_column_letter(ws4.max_column)}{ws4.max_row}"
+    cw5 = [10, 14, 10, 10, 6, 6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 12, 20, 10, 24]
+    for ci, w in enumerate(cw5, 1):
+        ws5.column_dimensions[get_column_letter(ci)].width = w
+    ws5.freeze_panes = 'A2'
+    ws5.auto_filter.ref = f"A1:{get_column_letter(ws5.max_column)}{ws5.max_row}"
 
-    # 绘制 Sheet4 右侧客服专属告示区
-    draw_legend_box(ws4, 25, [
+    # 绘制 Sheet5 右侧客服专属告示区
+    draw_legend_box(ws5, 25, [
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货'),
@@ -3367,15 +3626,15 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('FFF2CC', '🎁 赠品参考', '活动礼品/赠品专供，可参考预计到货期向买家答复赠送安排')
     ], title="🎨 客服查货与生产状态指引告示区")
 
-    # ── Sheet5: 疑似错误_待核对 ─────────────────────────────────────
+    # ── Sheet6: 疑似错误_待核对 ─────────────────────────────────────
     if audit_errors is None:
         audit_errors = []
         
-    ws5 = wb.create_sheet('疑似错误_待核对')
-    headers5 = ['款号', 'SKC', '颜色', '疑似异常类型', '涉及数据源文件', '表格原填交期', '涉及数量', '负责人/工厂', '疑问说明与核对建议']
-    ws5.append(headers5)
-    for ci, h in enumerate(headers5, 1):
-        cell = ws5.cell(1, ci)
+    ws6 = wb.create_sheet('疑似错误_待核对')
+    headers6 = ['款号', 'SKC', '颜色', '疑似异常类型', '涉及数据源文件', '表格原填交期', '涉及数量', '负责人/工厂', '疑问说明与核对建议']
+    ws6.append(headers6)
+    for ci, h in enumerate(headers6, 1):
+        cell = ws6.cell(1, ci)
         cell.fill = hf; cell.font = hfont
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = tb
@@ -3402,21 +3661,21 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             item.get('owner_factory', ''),
             item.get('suggestion', '')
         ]
-        ws5.append(row)
-        rn = ws5.max_row
-        for ci in range(1, len(headers5) + 1):
-            cell = ws5.cell(rn, ci)
+        ws6.append(row)
+        rn = ws6.max_row
+        for ci in range(1, len(headers6) + 1):
+            cell = ws6.cell(rn, ci)
             cell.border = tb
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw5 = [10, 14, 10, 24, 26, 14, 10, 16, 46]
-    for ci, w in enumerate(cw5, 1):
-        ws5.column_dimensions[get_column_letter(ci)].width = w
-    ws5.freeze_panes = 'A2'
-    ws5.auto_filter.ref = f"A1:{get_column_letter(ws5.max_column)}{ws5.max_row}"
+    cw6 = [10, 14, 10, 24, 26, 14, 10, 16, 46]
+    for ci, w in enumerate(cw6, 1):
+        ws6.column_dimensions[get_column_letter(ci)].width = w
+    ws6.freeze_panes = 'A2'
+    ws6.auto_filter.ref = f"A1:{get_column_letter(ws6.max_column)}{ws6.max_row}"
 
-    # 绘制 Sheet5 右侧专属告示区
+    # 绘制 Sheet6 右侧专属告示区
     draw_legend_box(ws5, 11, [
         ('FFF2CC', '🟡 ⚠️ 历史旧交期', '翻单表填写的交期早于当前日期，疑似复制旧模板未更新交期'),
         ('F4CCCC', '🔴 ⚠️ 大货表遗漏', '微信群中已有下单记录，但生产大货总表中未见此批翻单'),
@@ -3436,7 +3695,7 @@ if __name__ == '__main__':
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
         output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
-        customer_results, wh_neg_total, audit_errors = analyze()
+        customer_results, wh_neg_total, audit_errors, sheet3_drops_data = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
@@ -3447,12 +3706,14 @@ if __name__ == '__main__':
             customer_results = [c for c in customer_results if args.skc in c[0]]
         if audit_errors:
             audit_errors = [a for a in audit_errors if args.skc in a['skc'] or args.skc in a['code']]
+        if sheet3_drops_data:
+            sheet3_drops_data = [s for s in sheet3_drops_data if args.skc in s['code']]
 
-    if results or unmatched or customer_results:
+    if results or unmatched or customer_results or sheet3_drops_data:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
                         scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details,
-                        customer_results, wh_neg_total, audit_errors)
-        logger.info("完成: 窗口期到货%d条 | 客服参考%d条 | 库存回补%d条 | 疑似错误核对%d条 | 无翻单%d条",
-                    len(results), len(customer_results), len(sheet2_data), len(audit_errors), len(unmatched))
+                        customer_results, wh_neg_total, audit_errors, sheet3_drops_data)
+        logger.info("完成: 窗口期到货%d条 | 客服参考%d条 | 库存回补%d条 | 急剧减少需翻单%d条 | 疑似错误核对%d条 | 无翻单%d条",
+                    len(results), len(customer_results), len(sheet2_data), len(sheet3_drops_data) if sheet3_drops_data else 0, len(audit_errors), len(unmatched))
     else:
         logger.info("无数据")
