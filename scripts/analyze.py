@@ -532,16 +532,32 @@ def check_restock_inbound_status(snapshots, skc, shipped_val, total_qty_val, shi
         desc = orig_status if (orig_status and not any(kw in str(orig_status) for kw in ['已完成', '清', '在途', '入库'])) else f"🏭 生产中(预计{plan_str})"
         return 'IN_PRODUCTION', eff_dt, desc, False
 
-    # 3. 如果已经出货，判断出货时间是否在近期（15天以内）：
-    ref_ship_d = act_d or plan_d
-    is_recent_shipment = False
-    if ref_ship_d:
-        # 只有在出货时间位于 [today - 15天, today + 3天] 之间，才可能处于当前物理在途
-        if today_date - timedelta(days=15) <= ref_ship_d <= today_date + timedelta(days=3):
-            is_recent_shipment = True
+    # 3. 区分部分出货（分批交货中）与整单出货：
+    # 若出货数量仅为整单较小一部分（< 85%），且未显式标记清完，大头仍在生产中等待计划交期，绝非结案出清！
+    is_partial = False
+    if shipped_val is not None and shipped_val > 0 and total_qty_val is not None and total_qty_val > 0:
+        if shipped_val < total_qty_val * 0.85 and not is_shipped_clean_raw:
+            is_partial = True
 
-    if not is_recent_shipment:
-        # 超过 15 天前的历史出货，早已结案/入库入账，归为历史出清（不再判定为在途）
+    if is_partial:
+        # 部分出货仍以未来计划交期为主
+        eff_dt = plan_date if (plan_d and plan_d >= today_date) else (ship_date if ship_date else plan_date)
+        plan_str = (plan_d or act_d).strftime('%m-%d') if (plan_d or act_d) else "待定"
+        desc = f"🏭 生产中/部分已出{int(shipped_val)}件(预计{plan_str})"
+        return 'IN_PRODUCTION', eff_dt, desc, False
+
+    # 4. 判断出货/计划交期时间是否在近期：
+    ref_ship_d = act_d or plan_d
+
+    # 核心修正：交期处于未来 (ref_ship_d > today + 3天) 绝不是"历史出清"！
+    if ref_ship_d and ref_ship_d > today_date + timedelta(days=3):
+        eff_dt = plan_date if plan_date else ship_date
+        plan_str = ref_ship_d.strftime('%m-%d')
+        desc = f"🚚 生产完毕在途(预计{plan_str})" if has_really_shipped else f"🏭 生产中(预计{plan_str})"
+        return ('IN_TRANSIT' if has_really_shipped else 'IN_PRODUCTION'), eff_dt, desc, False
+
+    # 只有当出货时间早于 15 天前，才归为历史出清（不再判定为在途）
+    if ref_ship_d and ref_ship_d < today_date - timedelta(days=15):
         eff_dt = ship_date or plan_date
         return 'ARRIVED', eff_dt, ('已出清' if not orig_status else f"已出清({orig_status})"), True
 
@@ -3022,7 +3038,19 @@ def analyze():
             customer_results.append((skc, actual_date, d_cust))
 
         # 标准窗口期到货（Sheet 1 逻辑：排除已出清项，排除历史散表未下单项，需在网红店商品表中登记，且在统一窗口期内）
-        if d.get('is_cleared', False): continue
+        if d.get('is_cleared', False):
+            # 自愈放行闭环（用户强制规则）：
+            # 针对在统一窗口期内的翻单批次，虽标记为已出清，但当前仓库仍处于负库存（kexiao < 0），
+            # 且仓库并没有足额实际入库（实体库存不足以抵扣负库存，未真正解渴）：
+            # 绝不能简单过滤剔除！必须自愈放行纳入 Sheet 1，并打标醒目提示！
+            kexiao_val = wh_neg_total.get(skc, 0.0)
+            entity_val = whEntityTotal.get(skc, 0.0)
+            is_rescued = False
+            has_actual_arrived = ('已准确入库' in str(d.get('status', ''))) or (d.get('inbound_status') == 'ARRIVED' and entity_val >= max(15.0, 0.25 * float(d.get('qty', 0) or 50.0)))
+            if skc in neg_skcs and kexiao_val < 0 and not has_actual_arrived:
+                is_rescued = True
+            if not is_rescued:
+                continue
         if is_unconfirmed_old: continue
         if skc not in neg_skcs: continue
         pc_code = skc[:8]
@@ -3035,6 +3063,13 @@ def analyze():
                     d2['status'] = f"⚠️大货总表未更新待登记({tag_str})"
                 else:
                     d2['status'] = f"⚠️大货表待登({tag_str})"
+            elif d.get('is_cleared', False):
+                kexiao_val = wh_neg_total.get(skc, 0.0)
+                orig_st = str(d.get('status') or '')
+                if '已出清' in orig_st or '✅' in orig_st:
+                    d2['status'] = f"⚠️ 标出清但仓库仍深负({int(kexiao_val)}件待追查入库)"
+                else:
+                    d2['status'] = f"⚠️ 标出清但深负({int(kexiao_val)}件待核) | {orig_st}"
             d2['isApprox'] = False
             results.append((skc, actual_date, d2))
 
