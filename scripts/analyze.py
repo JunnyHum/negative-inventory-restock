@@ -3370,12 +3370,13 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     # ── Sheet2: 库存回补 ─────────────────────────────────────────────
     ws2 = wb.create_sheet('库存回补')
     headers2 = ['款号', 'SKC', '颜色',
+                 '建议操作', '操作依据',
+                 'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
+                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后',
                  '当前可销', '当前实体', '前表可销',
                  '恢复净增', '对应翻单数', '到货达成率',
                  '数量匹配提示', '商品表状态',
-                 'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
-                 '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后',
-                 '建议操作', '操作依据', '同链接主款', '商品ID']
+                 '同链接主款', '商品ID']
     ws2.append(headers2)
     for ci, h in enumerate(headers2, 1):
         cell = ws2.cell(1, ci)
@@ -3402,11 +3403,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         main_code, item_id = get_link_details(skc[:8])
         row = [
             skc[:8], skc, d2['color'],
-            round(d2['cur_total'], 0), round(entity, 0),
-            round(d2['prev_total'], 0),
-            round(inbound_d, 0), target_str, ratio_str,
-            d2.get('qty_match_tag', ''),
-            d2.get('shop_status_tag', ''),
+            d2.get('suggested_action', d2.get('action_text', '')),
+            d2.get('action_reason', ''),
             round(prev_sizes.get('XS', 0), 0), round(prev_sizes.get('S', 0), 0),
             round(prev_sizes.get('M', 0), 0),   round(prev_sizes.get('L', 0), 0),
             round(prev_sizes.get('XL', 0), 0),  round(prev_sizes.get('2XL', 0), 0),
@@ -3416,8 +3414,11 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(cur_sizes.get('M', 0), 0),  round(cur_sizes.get('L', 0), 0),
             round(cur_sizes.get('XL', 0), 0), round(cur_sizes.get('2XL', 0), 0),
             round(cur_sizes.get('均码', 0), 0),
-            d2.get('suggested_action', d2.get('action_text', '')),
-            d2.get('action_reason', ''),
+            round(d2['cur_total'], 0), round(entity, 0),
+            round(d2['prev_total'], 0),
+            round(inbound_d, 0), target_str, ratio_str,
+            d2.get('qty_match_tag', ''),
+            d2.get('shop_status_tag', ''),
             main_code,
             item_id,
         ]
@@ -3450,7 +3451,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw2 = [10, 14, 10, 10, 10, 10, 10, 12, 12, 18, 22, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 20, 32, 14, 16]
+    cw2 = [10, 14, 10, 20, 32, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 10, 10, 10, 10, 12, 12, 18, 22, 14, 16]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
