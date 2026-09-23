@@ -2508,46 +2508,66 @@ def analyze():
                 if shop_type == "on_sale":
                     if match_level == 1:
                         action_text = "建议开启同步"
+                        action_tag = "🟢 建议开启同步"
                         status_priority = 1
                     elif match_level == 2:
                         action_text = "酌情/限额开启同步"
+                        action_tag = "🟡 酌情/限额开启同步"
                         status_priority = 2
                     elif match_level == 3:
                         action_text = "暂缓同步(先到量过少)"
+                        action_tag = "⚪ 暂缓同步(先到量过少)"
                         status_priority = 7
                     elif match_level == 4:
                         action_text = "运营核实后开启"
+                        action_tag = "🔵 运营核实后开启"
                         status_priority = 3
                     else:
                         action_text = "散件入库(暂不开启)"
+                        action_tag = "⚪ 散件入库(暂不开启)"
                         status_priority = 8
                 elif shop_type == "new_arrival":
                     if match_level == 1:
                         action_text = "大货到齐/待建档上架"
+                        action_tag = "🌟 大货到齐/待建档上架"
                         status_priority = 4
                     elif match_level == 2:
                         action_text = "首批先到/准备建档"
+                        action_tag = "🌟 首批先到/准备建档"
                         status_priority = 5
                     elif match_level == 3:
                         action_text = "零星先到/暂缓上架"
+                        action_tag = "⚪ 零星先到/暂缓上架"
                         status_priority = 9
                     else:
                         action_text = "大货到仓/待建档上架"
+                        action_tag = "🌟 大货到仓/待建档上架"
                         status_priority = 5
                 elif shop_type == "exclusive":
                     action_text = "关注分流/非本店在售"
+                    action_tag = "🟣 关注分流/非本店在售"
                     status_priority = 6
                 elif shop_type == "unlisted_restock":
                     action_text = "待核实建档(本店漏录或专供)"
+                    action_tag = "⚠️ 待核实建档(本店漏录)"
                     status_priority = 10
                 elif shop_type == "gift":
                     action_text = "客服/赠品备货(无需上架)"
+                    action_tag = "🎁 客服备货(无需上架)"
                     status_priority = 11
                 else:
                     action_text = "待供应链核对"
+                    action_tag = "❓ 待供应链核对"
                     status_priority = 12
 
-                # 完整两段式运营指令：【数量匹配描述】 ｜ [商品表状态] ➔ 行动指令
+                # 结构化简要决策依据（突出数字与比率，不冗余重复）
+                if target_order_qty > 0:
+                    order_label = "首单" if is_first_order else "翻单"
+                    action_reason = f"{order_label}{int(target_order_qty)}实到{int(inbound_delta)}(达成率{int(match_ratio*100)}%) ｜ {shop_status_tag}"
+                else:
+                    action_reason = f"实到{int(inbound_delta)}件(无明确翻单) ｜ {shop_status_tag}"
+
+                # 完整两段式运营指令（备用与兼容）
                 full_remark = f"{qty_match_desc} ｜ [{shop_status_tag}] ➔ {action_text}"
 
                 sheet2_data.append({
@@ -2558,11 +2578,13 @@ def analyze():
                     'inbound_delta': inbound_delta,
                     'target_order_qty': target_order_qty,
                     'match_ratio': match_ratio,
-                    'qty_match_tag': qty_match_tag,     # 维度一独立列
-                    'shop_status_tag': shop_status_tag, # 维度二独立列
+                    'qty_match_tag': qty_match_tag,         # 维度一独立列
+                    'shop_status_tag': shop_status_tag,     # 维度二独立列
+                    'suggested_action': action_tag,         # 独立列：简要操作建议
+                    'action_reason': action_reason,         # 独立列：简要决策依据
                     'prev_sizes': prev_sizes,
                     'cur_sizes':  cur_sizes,
-                    '备注': full_remark,                 # 综合指令列
+                    '备注': full_remark,                     # 综合指令兼容列
                     'action_text': action_text,
                     'priority': status_priority,
                 })
@@ -3353,7 +3375,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
                  '数量匹配提示', '商品表状态',
                  'XS前', 'S前', 'M前', 'L前', 'XL前', '2XL前', '均码前',
                  '后表可销', 'XS后', 'S后', 'M后', 'L后', 'XL后', '2XL后', '均码后',
-                 '运营操作指令', '同链接主款', '商品ID']
+                 '建议操作', '操作依据', '同链接主款', '商品ID']
     ws2.append(headers2)
     for ci, h in enumerate(headers2, 1):
         cell = ws2.cell(1, ci)
@@ -3394,7 +3416,8 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             round(cur_sizes.get('M', 0), 0),  round(cur_sizes.get('L', 0), 0),
             round(cur_sizes.get('XL', 0), 0), round(cur_sizes.get('2XL', 0), 0),
             round(cur_sizes.get('均码', 0), 0),
-            remark,
+            d2.get('suggested_action', d2.get('action_text', '')),
+            d2.get('action_reason', ''),
             main_code,
             item_id,
         ]
@@ -3427,14 +3450,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
 
-    cw2 = [10, 14, 10, 10, 10, 10, 10, 12, 12, 18, 22, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 45, 14, 16]
+    cw2 = [10, 14, 10, 10, 10, 10, 10, 12, 12, 18, 22, 6, 6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 20, 32, 14, 16]
     for ci, w in enumerate(cw2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A2'
     ws2.auto_filter.ref = f"A1:{get_column_letter(ws2.max_column)}{ws2.max_row}"
 
     # 绘制 Sheet2 右侧告示区
-    draw_legend_box(ws2, 31, [
+    draw_legend_box(ws2, 32, [
         ('DAEFCE', '🟢 建议开启同步', '【本店在售】且【翻单/首单大货到齐(≥60%)】，货量充沛，立即开启商品同步'),
         ('FFF2CC', '🟡 酌情/限额开启', '【本店在售】且【分批部分先到(20%~60%)】，建议限额或酌情开启同步'),
         ('E2EFDA', '🌟 新品待建档上架', '【本店未录/首单新品】实物大货到仓，提示运营录入主商品表并建档上架'),
