@@ -1497,6 +1497,68 @@ def parse_individual_restock_file(filepath):
     return records
 
 
+def compute_intelligent_window_period(today, config=None, all_restock=None):
+    """
+    智能自适应到货窗口期计算引擎：
+    1. 季节感知基线 (Seasonal Baseline)：
+       - 秋冬季备货周期 (8月 ~ 次年2月)：秋冬卫衣、夹克外套、棉服羽绒服工序复杂，且叠加双11/双12秋冬备货与春节前排产旺季，
+         生产翻单周期普遍拉长至 25~30 天，基准前瞻天数自适应设定为 30 天；
+       - 春夏季轻薄周期 (3月 ~ 7月)：短袖短裤等单薄款生产周期短（约12~18天），基准前瞻天数为 20 天。
+    2. 大货排单实况动态感知 (Data-Driven Dynamic Sensing)：
+       - 若生产总表/翻单表中检测到有效活跃未出清的翻单排期密集延伸到未来 25~30 天甚至更远，
+         系统自适应上调前瞻天数以完整承接真实业务大货到货计划（上限封顶 max_adaptive_forward_days，默认 35 天，防止引入远期异常脏数据）。
+    3. 回溯窗口 (Backward Days)：
+       - 默认前 10 天，覆盖近期已实际出厂在途或刚入库核验对账的批次。
+    4. 灵活配置化覆盖：
+       - 支持在 config.json 的 window_period 中自定义指定或覆盖。
+    """
+    wp_cfg = (config or {}).get('window_period', {})
+    mode = wp_cfg.get('mode', 'auto')
+    backward_days = int(wp_cfg.get('backward_days', 10))
+    aw_forward = int(wp_cfg.get('autumn_winter_forward_days', 30))
+    ss_forward = int(wp_cfg.get('spring_summer_forward_days', 20))
+    max_adaptive = int(wp_cfg.get('max_adaptive_forward_days', 35))
+
+    month = today.month
+    is_autumn_winter = (month in [8, 9, 10, 11, 12, 1, 2])
+    base_forward = aw_forward if is_autumn_winter else ss_forward
+    season_name = f"秋冬季({month}月)" if is_autumn_winter else f"春夏季({month}月)"
+    forward_days = base_forward
+
+    sensing_note = ""
+    # 动态排单数据感知
+    if mode == 'auto' and all_restock:
+        valid_active_deltas = []
+        for (skc, dt), d in all_restock.items():
+            if not d.get('is_cleared', False) and dt:
+                dt_date = dt.date() if isinstance(dt, datetime) else dt
+                delta = (dt_date - today.date()).days
+                # 统计未来 1~45 天内的合理翻单排期
+                if 0 < delta <= 45:
+                    valid_active_deltas.append(delta)
+        if valid_active_deltas:
+            valid_active_deltas.sort()
+            # 取 90 分位与最远排期
+            p90_delta = valid_active_deltas[int(len(valid_active_deltas) * 0.9)]
+            max_delta = max(valid_active_deltas)
+            # 若密集排期超出基准天数，自适应扩展
+            if p90_delta > forward_days:
+                adaptive_target = min(p90_delta + 2, max_delta, max_adaptive)
+                if adaptive_target > forward_days:
+                    forward_days = adaptive_target
+                    sensing_note = f" (大货排单动态感知最远至+{max_delta}天，自适应上调至{forward_days}天)"
+
+    if mode == 'manual' and wp_cfg.get('forward_days'):
+        forward_days = int(wp_cfg.get('forward_days'))
+        season_name = "手动固定模式"
+
+    window_start = today - timedelta(days=backward_days)
+    window_end = today + timedelta(days=forward_days)
+    window_desc = f"{season_name}智能{forward_days}天模式{sensing_note}"
+
+    return window_start, window_end, forward_days, window_desc
+
+
 # ── 主分析 ────────────────────────────────────────────────────────────────────
 def analyze():
     config = load_config()
@@ -1560,11 +1622,10 @@ def analyze():
         except ValueError:
             pass
 
-    # 动态窗口期：今天前10天 ~ 今天后20天（用户明确指示：Sheet 1 窗口期与客服表完全统一保持一致）
-    window_start = today - timedelta(days=10)
-    window_end   = today + timedelta(days=20)
+    # 智能自适应到货窗口期（初始基准：根据季节性自动识别秋冬季 30 天 / 春夏季 20 天）
+    window_start, window_end, forward_days, window_desc = compute_intelligent_window_period(today, config)
     customer_window_end = window_end
-    logger.info("窗口期(Sheet 1与客服表统一): %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
+    logger.info("🎯 智能自适应到货窗口期初始确立: %s ~ %s (%s)", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'), window_desc)
 
     def is_older_than_last_week(source_name, base_date=today):
         """
@@ -2973,9 +3034,14 @@ def analyze():
     # 执行全局跨源前置去重融合
     deduped_entries = merge_all_restock_entries(all_restock)
 
+    # 动态排单二阶感知校验（结合大货表全量活跃订单排期，若检测到密集长交期则平滑扩展）
+    window_start, window_end, forward_days, window_desc = compute_intelligent_window_period(today, config, all_restock)
+    customer_window_end = window_end
+
     results = []
     customer_results = []
-    logger.info("统一窗口期范围 (Sheet 1 与 客服表保持一致): %s ~ %s", window_start.strftime('%m/%d'), window_end.strftime('%m/%d'))
+    logger.info("🎯 统一智能窗口期最终生效范围 (Sheet 1 与 客服表保持一致): %s ~ %s (%s)", 
+                window_start.strftime('%m/%d'), window_end.strftime('%m/%d'), window_desc)
 
     for skc, actual_date, d in deduped_entries:
         src = d.get('source') or ''
@@ -3244,14 +3310,21 @@ def analyze():
 
     logger.info("疑似错误待核对项归集: %d条", len(audit_errors))
 
+    window_info = {
+        'start': window_start,
+        'end': window_end,
+        'forward_days': forward_days,
+        'desc': window_desc
+    }
+
     return results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
            paths['output_dir'], sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
-           customer_results, wh_neg_total, audit_errors, sheet3_drops_data
+           customer_results, wh_neg_total, audit_errors, sheet3_drops_data, window_info
 
 # ── Excel 输出 ───────────────────────────────────────────────────────────────
 def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
              output_dir, sheet2_data, whEntityTotal, product_table=None, wh_file=None, omitted_details=None,
-             customer_results=None, wh_neg_total=None, audit_errors=None, sheet3_drops_data=None):
+             customer_results=None, wh_neg_total=None, audit_errors=None, sheet3_drops_data=None, window_info=None):
     from datetime import datetime
     import re
     
@@ -3268,6 +3341,14 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         counter += 1
 
     wb = openpyxl.Workbook()
+
+    w_start = (window_info or {}).get('start')
+    w_end = (window_info or {}).get('end')
+    f_days = (window_info or {}).get('forward_days', 30)
+    w_desc = (window_info or {}).get('desc', '智能窗口期模式')
+    w_start_str = w_start.strftime("%m/%d") if w_start else ""
+    w_end_str = w_end.strftime("%m/%d") if w_end else ""
+    window_legend_item = ('E2EFDA', f'⏱️ 智能到货窗口期: {w_start_str} ~ {w_end_str}', f'{w_desc}，前瞻覆盖未来{f_days}天大货排期')
 
     hf   = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
     hfont = Font(color='FFFFFF', bold=True, size=10)
@@ -3396,6 +3477,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
 
     # 绘制 Sheet1 右侧告示区
     draw_legend_box(ws1, 26, [
+        window_legend_item,
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
         ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
@@ -3676,6 +3758,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
 
     # 绘制 Sheet5 右侧客服专属告示区
     draw_legend_box(ws5, 25, [
+        ('E2EFDA', f'⏱️ 智能到货窗口期: {w_start_str} ~ {w_end_str}', f'{w_desc}，全量在途与到仓明细'),
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货'),
@@ -3735,7 +3818,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
     ws6.auto_filter.ref = f"A1:{get_column_letter(ws6.max_column)}{ws6.max_row}"
 
     # 绘制 Sheet6 右侧专属告示区
-    draw_legend_box(ws5, 11, [
+    draw_legend_box(ws6, 11, [
         ('FFF2CC', '🟡 ⚠️ 历史旧交期', '翻单表填写的交期早于当前日期，疑似复制旧模板未更新交期'),
         ('F4CCCC', '🔴 ⚠️ 大货表遗漏', '微信群中已有下单记录，但生产大货总表中未见此批翻单'),
         ('E2EFDA', '🟢 ⚠️ 商品表未录', '已有翻单安排，但《SG网红店商品表.xlsx》中尚未建档录入该款'),
@@ -3754,7 +3837,7 @@ if __name__ == '__main__':
 
     results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores, \
         output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details, \
-        customer_results, wh_neg_total, audit_errors, sheet3_drops_data = analyze()
+        customer_results, wh_neg_total, audit_errors, sheet3_drops_data, window_info = analyze()
 
     if args.skc:
         results  = [r for r in results  if args.skc in r[0]]
@@ -3771,7 +3854,7 @@ if __name__ == '__main__':
     if results or unmatched or customer_results or sheet3_drops_data:
         path = to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched,
                         scores, output_dir, sheet2_data, whEntityTotal, product_table, wh_file, omitted_details,
-                        customer_results, wh_neg_total, audit_errors, sheet3_drops_data)
+                        customer_results, wh_neg_total, audit_errors, sheet3_drops_data, window_info)
         logger.info("完成: 窗口期到货%d条 | 客服参考%d条 | 库存回补%d条 | 急剧减少需翻单%d条 | 疑似错误核对%d条 | 无翻单%d条",
                     len(results), len(customer_results), len(sheet2_data), len(sheet3_drops_data) if sheet3_drops_data else 0, len(audit_errors), len(unmatched))
     else:

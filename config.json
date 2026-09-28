@@ -18,5 +18,12 @@
   "shop": {
     "name": "SG网红店",
     "biz_keywords": ["淘宝sg网红店", "sg网红店", "c2店"]
+  },
+  "window_period": {
+    "mode": "auto",
+    "autumn_winter_forward_days": 30,
+    "spring_summer_forward_days": 20,
+    "backward_days": 10,
+    "max_adaptive_forward_days": 35
   }
 }
