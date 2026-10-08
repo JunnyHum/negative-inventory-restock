@@ -2227,9 +2227,30 @@ def analyze():
         wechat_dir = os.path.expanduser(paths.get('wechat_file_dir') or '/Users/junny/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_iqz0imhyx4m812_8da3/msg/file')
         
         candidates = []
-        candidates += glob.glob(os.path.join(desktop_dir, "*翻单*.xlsx"))
-        if os.path.exists(wechat_dir):
-            candidates += glob.glob(os.path.join(wechat_dir, "**", "*翻单*.xlsx"), recursive=True)
+        # 1. 扫描生产部补单表目录：除两份大货总表和临时文件外，所有 Excel 均视为独立翻单散表/小表
+        if os.path.exists(desktop_dir):
+            for fname in os.listdir(desktop_dir):
+                if fname.endswith('.xlsx') and not fname.startswith('~$') and not fname.startswith('.~'):
+                    # 排除大货总表
+                    if any(kw in fname for kw in ['SG品牌进度表', '专供订单进度', 'SG.NBA']):
+                        continue
+                    candidates.append(os.path.join(desktop_dir, fname))
+                    
+        # 2. 补充扫描桌面与下载目录下的独立翻单散表（方便用户随手存放）
+        for extra_dir in [os.path.expanduser('~/Desktop'), os.path.expanduser('~/Downloads')]:
+            if os.path.exists(extra_dir):
+                candidates += glob.glob(os.path.join(extra_dir, "*翻单*.xlsx"))
+                candidates += glob.glob(os.path.join(extra_dir, "*补单*.xlsx"))
+
+        # 3. 尝试扫描微信接收目录（带容错）
+        try:
+            if os.path.exists(wechat_dir):
+                candidates += glob.glob(os.path.join(wechat_dir, "**", "*翻单*.xlsx"), recursive=True)
+        except Exception:
+            pass
+        
+        # 去重路径
+        candidates = list(dict.fromkeys(candidates))
             
         now = today
         now_year, now_week, _ = now.isocalendar()
@@ -2444,6 +2465,23 @@ def analyze():
                 'channel': '',
                 'extra_remarks': ''
             }
+            
+            # 同步注入全局记录库，确保 Sheet 3（款号急剧减少与在途翻单分析）能够精准识别微信散表在途
+            pc_k = skc_k[:8]
+            cc_k = skc_k[8:] if len(skc_k) > 8 else ''
+            tot_qty = sum(sizes_filled.values())
+            master_records_db.append({
+                'code': pc_k,
+                'cc': cc_k,
+                'color': meta.get('color', '') or wh_colors_txt.get(skc_k, ''),
+                'date': delivery_date,
+                'qty': tot_qty,
+                'is_cleared': False,
+                'order_type': '翻单',
+                'channel': '微信小表',
+                'source': meta.get('source', '') or '微信翻单',
+                'extra_remarks': meta.get('status', '')
+            })
                 
     except Exception as e:
         logger.error("扫描独立翻单表失败: %s", e)
@@ -3049,6 +3087,18 @@ def analyze():
             is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_last_week(src, base_date=today))
         else:
             is_unconfirmed_old = (d.get('is_omitted_from_master', False) and is_older_than_two_weeks(src, base_date=today))
+
+        # 核心自愈防误杀闭环：
+        # 若大货总表漏登，但该款号处于当前仓库负库存(kexiao < 0)，或其交期正处于当前有效窗口期内且尚未出清，
+        # 说明该翻单属于重点在途救急批次（生产部文员经常漏登散表），绝不能被当作过期废弃单误杀！强制放行并予以告警！
+        kexiao_check = wh_neg_total.get(skc, 0.0)
+        is_urgently_needed = (skc in neg_skcs or kexiao_check < 0)
+        is_in_active_window = (actual_date and window_start <= actual_date <= window_end)
+        if is_unconfirmed_old and (is_urgently_needed or is_in_active_window) and not d.get('is_cleared', False):
+            logger.info("  [自愈放行] 款号 %s (SKC: %s, 交期: %s) 虽然大货表漏登且源自散表，但处于负库存/有效窗口期内，豁免过滤放行！",
+                        skc[:8], skc, actual_date.strftime('%Y-%m-%d') if actual_date else '未知')
+            is_unconfirmed_old = False
+            d['is_force_rescued_from_omitted'] = True
 
         owner = d.get('status') or ''
         bname = os.path.basename(src) if src else ''
