@@ -2242,12 +2242,17 @@ def analyze():
                 candidates += glob.glob(os.path.join(extra_dir, "*翻单*.xlsx"))
                 candidates += glob.glob(os.path.join(extra_dir, "*补单*.xlsx"))
 
-        # 3. 尝试扫描微信接收目录（带容错）
+        # 3. 尝试扫描微信接收目录（带容错与多维度特征匹配）
         try:
             if os.path.exists(wechat_dir):
                 candidates += glob.glob(os.path.join(wechat_dir, "**", "*翻单*.xlsx"), recursive=True)
-        except Exception:
-            pass
+                candidates += glob.glob(os.path.join(wechat_dir, "**", "*补单*.xlsx"), recursive=True)
+                candidates += glob.glob(os.path.join(wechat_dir, "**", "*桥*.xlsx"), recursive=True)
+                candidates += glob.glob(os.path.join(wechat_dir, "**", "*唐*.xlsx"), recursive=True)
+                candidates += glob.glob(os.path.join(wechat_dir, "**", "*SG*.xlsx"), recursive=True)
+                candidates += glob.glob(os.path.join(wechat_dir, "**", "*NBA*.xlsx"), recursive=True)
+        except Exception as e:
+            logger.warning("  微信目录穿透读取异常(多为系统权限拦截): %s", e)
         
         # 去重路径
         candidates = list(dict.fromkeys(candidates))
