@@ -1306,6 +1306,54 @@ def findApproxColorMatches(negSkcs, allRestock, skcHasAny, wh_all_skcs=None):
     return approxMatches
 
 
+def resolve_exclusive_channel_tag(channel_str='', extra_remarks='', status_str='', filename='', product_code=''):
+    """
+    全链路渠道独占与专供识别引擎：
+    自动识别得物、线下实体、天猫专供、买断/摆摊、限定款等渠道独占特征。
+    返回: (ch_tag, ch_label, ch_desc, is_exclusive)
+    - ch_tag: 形如 '[得物独占]', '[线下独占]', '[天猫专供]', '[买断/摆摊]', '[限定款]' 等，若非独占则返回 ''
+    - ch_label: 形如 '🟣 得物独占'
+    - ch_desc: 说明文字
+    - is_exclusive: 布尔值
+    """
+    comb = f"{channel_str} {extra_remarks} {status_str} {filename}".lower()
+    
+    # 1. 得物系 (得物专供、得物货品、得物买断、得物400、得物200件、dewu、毒等)
+    if any(kw in comb for kw in ['得物', 'dewu', '毒']):
+        return '[得物独占]', '🟣 得物独占', '得物平台专供/买断货品，注意渠道分流', True
+        
+    # 2. 线下实体系 (线下翻单、专柜、实体、门店、SG线下等)
+    if any(kw in comb for kw in ['线下', '专柜', '实体', '门店']):
+        return '[线下独占]', '🟣 线下独占', '线下专柜及实体门店专供货品，防跨渠道混卖', True
+        
+    # 3. 天猫专供系 (天猫专供、tmall、猫店等)
+    if any(kw in comb for kw in ['天猫', 'tmall', '猫店']):
+        return '[天猫专供]', '🟣 天猫专供', '天猫官方旗舰店专供货品', True
+        
+    # 4. 买断/摆摊 (买断、摆摊、市集等)
+    if any(kw in comb for kw in ['买断', '摆摊', '市集']):
+        return '[买断/摆摊]', '🟣 买断/摆摊', '买断包销或摆摊特卖款', True
+        
+    # 5. 限定款 (限定、展会等)
+    if '限定' in comb:
+        m = re.search(r'([\u4e00-\u9fa5A-Za-z0-9]+限定)', f"{channel_str} {extra_remarks} {status_str} {filename}")
+        name = m.group(1) if m else '限定款'
+        return f"[{name}]", f"🟣 {name}", '特定活动或区域限定款', True
+
+    # 6. 微商城/唯品会/企业店
+    if any(kw in comb for kw in ['唯品会', 'vip']):
+        return '[唯品会专供]', '🟣 唯品会专供', '唯品会渠道专供', True
+    if any(kw in comb for kw in ['微商城', '有赞']):
+        return '[微商城专供]', '🟣 微商城专供', '微商城私域专供', True
+    if any(kw in comb for kw in ['企业店', 'c2']):
+        return '[企业店专供]', '🟣 企业店专供', '企业店渠道专供', True
+    # 7. 达人专供/抖音
+    if any(kw in comb for kw in ['达人', '抖音达人']):
+        return '[达人专供]', '🟣 达人专供', '抖音/达人渠道专供货品', True
+
+    return '', '', '', False
+
+
 def parse_individual_restock_file(filepath):
     """
     解析独立的行格式翻单表（例如 SG26年电商款翻单XXXX.xlsx）。
@@ -1349,6 +1397,9 @@ def parse_individual_restock_file(filepath):
         indexes = {
             'code': None, 'spec': None, 'color': None, 'size': None,
             'qty': None, 'delivery': None, 'factory': None, 'status': None,
+            'channel': None, 'remarks': None,
+            'offline_qty': None, 'tb_qty': None, 'tmall_qty': None,
+            'dewu_qty': None, 'daren_qty': None, 'channel_rem': None
         }
         
         for idx, cell in enumerate(header):
@@ -1370,9 +1421,28 @@ def parse_individual_restock_file(filepath):
                 indexes['factory'] = idx
             elif val in ['生产部', '状态', '生产状态']:
                 indexes['status'] = idx
-            elif val == '备注':
+            elif val in ['专供', '得物专供', '专供渠道', '渠道', '专供款', '销售渠道']:
+                indexes['channel'] = idx
+            elif val in ['备注', '单渠道下单备注']:
                 if indexes['status'] is None:
                     indexes['status'] = idx
+                elif indexes['remarks'] is None:
+                    indexes['remarks'] = idx
+            
+            # 识别右侧【单渠道下单备注】列
+            if idx >= 50:
+                if val == '线下':
+                    indexes['offline_qty'] = idx
+                elif val in ['c店', '淘宝c店', '淘宝']:
+                    indexes['tb_qty'] = idx
+                elif val in ['天猫', '猫店']:
+                    indexes['tmall_qty'] = idx
+                elif val in ['得物', '毒']:
+                    indexes['dewu_qty'] = idx
+                elif val in ['达人', '抖音达人']:
+                    indexes['daren_qty'] = idx
+                elif val == '备注':
+                    indexes['channel_rem'] = idx
 
         # 兜底匹配 qty 列
         if indexes['qty'] is None:
@@ -1390,6 +1460,8 @@ def parse_individual_restock_file(filepath):
         last_delivery = None
         last_factory = ''
         last_status = ''
+        last_pc_color = None
+        cur_channel_meta = {'off': 0.0, 'tb': 0.0, 'tm': 0.0, 'dw': 0.0, 'dr': 0.0, 'rem': ''}
         
         # 3. 遍历行
         for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
@@ -1405,8 +1477,6 @@ def parse_individual_restock_file(filepath):
             is_gift = is_gift_code(pc, color)
             
             # NOTE: 双重验证颜色编号 —— 两路来源互为兜底，防止遗漏
-            # 来源1: 颜色字段中的 [XX] 格式编号（如 [03]本白 -> '03'）
-            # 来源2: 条码列（12位规格码 = 款号8位+颜色2位+尺码2位）第8~10位
             cc_candidates = set()
             mc = re.search(r'\[(\d+)\]', color)
             if mc:
@@ -1451,6 +1521,79 @@ def parse_individual_restock_file(filepath):
                 if isinstance(v, (int, float)):
                     qty_val = float(v)
                     
+            channel = ''
+            if indexes.get('channel') is not None and len(rd) > indexes['channel']:
+                channel = str(rd[indexes['channel']]).strip() if rd[indexes['channel']] else ''
+                
+            remarks = ''
+            if indexes.get('remarks') is not None and len(rd) > indexes['remarks']:
+                remarks = str(rd[indexes['remarks']]).strip() if rd[indexes['remarks']] else ''
+                
+            # 默认渠道特征（从文件名推断）
+            default_channel = ''
+            if '线下' in filename:
+                default_channel = '线下'
+            elif any(kw in filename.lower() for kw in ['得物', 'dewu', '毒']):
+                default_channel = '得物'
+            elif any(kw in filename.lower() for kw in ['天猫', 'tmall']):
+                default_channel = '天猫'
+            elif '买断' in filename or '摆摊' in filename:
+                default_channel = '买断/摆摊'
+
+            # 提取右侧【单渠道下单备注】
+            def _get_channel_val(idx_key):
+                col_i = indexes.get(idx_key)
+                if col_i is not None and len(rd) > col_i and rd[col_i] is not None:
+                    try: return float(rd[col_i])
+                    except: return 0.0
+                return 0.0
+
+            row_off = _get_channel_val('offline_qty')
+            row_tb  = _get_channel_val('tb_qty')
+            row_tm  = _get_channel_val('tmall_qty')
+            row_dw  = _get_channel_val('dewu_qty')
+            row_dr  = _get_channel_val('daren_qty')
+            cr_idx  = indexes.get('channel_rem')
+            row_cr  = str(rd[cr_idx]).strip() if (cr_idx is not None and len(rd) > cr_idx and rd[cr_idx]) else ''
+
+            pc_color_k = (pc, tuple(sorted(cc_candidates)))
+            if pc_color_k != last_pc_color:
+                cur_channel_meta = {'off': row_off, 'tb': row_tb, 'tm': row_tm, 'dw': row_dw, 'dr': row_dr, 'rem': row_cr}
+                last_pc_color = pc_color_k
+            else:
+                if row_off > 0: cur_channel_meta['off'] = row_off
+                if row_tb > 0:  cur_channel_meta['tb'] = row_tb
+                if row_tm > 0:  cur_channel_meta['tm'] = row_tm
+                if row_dw > 0:  cur_channel_meta['dw'] = row_dw
+                if row_dr > 0:  cur_channel_meta['dr'] = row_dr
+                if row_cr:      cur_channel_meta['rem'] = row_cr
+
+            dw_q = cur_channel_meta['dw']
+            tb_q = cur_channel_meta['tb']
+            tm_q = cur_channel_meta['tm']
+            off_q = cur_channel_meta['off']
+            dr_q = cur_channel_meta['dr']
+            rem_q = cur_channel_meta['rem']
+
+            derived_channel = ''
+            derived_remarks = rem_q
+            # 1. 明确标记得物专供或仅有得物单
+            if any(kw in rem_q for kw in ['得物专供', '得物买断', '得物']) or (dw_q > 0 and tb_q == 0 and tm_q == 0 and off_q == 0 and dr_q == 0):
+                derived_channel = '得物'
+                if not derived_remarks: derived_remarks = f"得物专供{int(dw_q)}件"
+            elif any(kw in rem_q for kw in ['达人专供', '达人']) or (dr_q > 0 and tb_q == 0 and tm_q == 0 and off_q == 0 and dw_q == 0):
+                derived_channel = '达人专供'
+            elif (off_q > 0 and tb_q == 0 and tm_q == 0 and dw_q == 0 and dr_q == 0):
+                derived_channel = '线下'
+            elif (tm_q > 0 and tb_q == 0 and dw_q == 0 and off_q == 0 and dr_q == 0):
+                derived_channel = '天猫'
+            elif dw_q > 0:
+                # 含有得物分流
+                derived_remarks = f"{derived_remarks} (含得物{int(dw_q)}件)" if derived_remarks else f"含得物{int(dw_q)}件"
+
+            effective_channel = channel or derived_channel or default_channel
+            effective_remarks = remarks or derived_remarks
+
             # Forward Fill 向下填充 (全局向下填充以支持跨货号合并单元格的交期、工厂、状态正常传递)
             if delivery_date is None:
                 delivery_date = last_delivery
@@ -1490,7 +1633,10 @@ def parse_individual_restock_file(filepath):
                     'delivery': delivery_date,
                     'raw_delivery': raw_deliv_orig,
                     'factory': factory,
-                    'status': status
+                    'status': status,
+                    'channel': effective_channel,
+                    'remarks': effective_remarks,
+                    'source': filename
                 })
             
     wb.close()
@@ -2414,7 +2560,9 @@ def analyze():
                         'factory': str(r['factory']) if r['factory'] else '',
                         'is_missing_delivery': is_missing_delivery,
                         'raw_delivery': r.get('raw_delivery'),
-                        'source': basename
+                        'source': basename,
+                        'channel': r.get('channel', ''),
+                        'remarks': r.get('remarks', '')
                     }
                     
                     if skc:
@@ -2466,22 +2614,27 @@ def analyze():
             for sz_k, qty_v in sizes.items():
                 if sz_k in sizes_filled:
                     sizes_filled[sz_k] = qty_v
+            
+            src_str = meta.get('source', '') or '微信翻单'
+            ch_str = meta.get('channel', '')
+            rem_str = meta.get('remarks', '') or meta.get('status', '')
             all_restock[key] = {
                 'sizes': sizes_filled,
                 'color': meta.get('color', '') or wh_colors_txt.get(skc_k, ''),
                 'status': meta.get('status', ''),
                 'factory': meta.get('factory', ''),
                 'is_missing_delivery': is_missing,
-                'source': meta.get('source', '') or '微信翻单',
+                'source': src_str,
                 'order_type': '翻单',
-                'channel': '',
-                'extra_remarks': ''
+                'channel': ch_str,
+                'extra_remarks': rem_str
             }
             
             # 同步注入全局记录库，确保 Sheet 3（款号急剧减少与在途翻单分析）能够精准识别微信散表在途
             pc_k = skc_k[:8]
             cc_k = skc_k[8:] if len(skc_k) > 8 else ''
             tot_qty = sum(sizes_filled.values())
+            effective_db_channel = ch_str or ('线下' if '线下' in src_str else ('得物' if '得物' in src_str else '微信小表'))
             master_records_db.append({
                 'code': pc_k,
                 'cc': cc_k,
@@ -2490,9 +2643,9 @@ def analyze():
                 'qty': tot_qty,
                 'is_cleared': False,
                 'order_type': '翻单',
-                'channel': '微信小表',
-                'source': meta.get('source', '') or '微信翻单',
-                'extra_remarks': meta.get('status', '')
+                'channel': effective_db_channel,
+                'source': src_str,
+                'extra_remarks': rem_str
             })
                 
     except Exception as e:
@@ -2815,39 +2968,52 @@ def analyze():
             
             is_gift = any(is_gift_code(code, c) for c in colors_list) if colors_list else is_gift_code(code, '')
             is_nba = code.startswith('NE') or any('NBA' in str(r.get('source', '')).upper() for r in code_db_recs)
-            is_exclusive = is_nba or any(any(kw in str(r.get('extra_remarks', '') + r.get('channel', '')) for kw in ['限定', '买断', '摆摊', '得物', '天猫', '线下']) for r in code_db_recs)
+            all_ch_strs = " ".join([str(r.get('channel', '')) for r in code_db_recs])
+            all_rem_strs = " ".join([str(r.get('extra_remarks', '')) for r in code_db_recs])
+            all_src_strs = " ".join([str(r.get('source', '')) for r in code_db_recs])
+            all_st_strs = " ".join([str(r.get('status', '')) for r in code_db_recs])
+            
+            ch_tag, ch_label, ch_desc, is_ch_exclusive = resolve_exclusive_channel_tag(
+                all_ch_strs, all_rem_strs, all_st_strs, all_src_strs, code
+            )
+            is_exclusive = is_nba or is_ch_exclusive
+            exclusive_tag_show = ch_label if ch_label else "🟣 非本店专供"
 
-            if is_in_pt:
+            if is_exclusive:
+                if is_in_pt:
+                    shop_status = f"✅ 本店在售[{exclusive_tag_show}]"
+                else:
+                    shop_status = exclusive_tag_show
+            elif is_in_pt:
                 shop_status = "✅ 本店在售"
             elif is_gift:
                 shop_status = "🎁 赠品款号"
-            elif is_exclusive:
-                shop_status = "🟣 非本店专供"
             else:
                 shop_status = "❓ 本店未录"
 
             # 6. 库存紧缺等级与翻单决策指令
             # 分级：深负库存(<0)、濒危(0~29)、健康(>=30)
+            ex_notice = " (⚠️注意渠道独占/防跨渠道混卖)" if is_exclusive else ""
             if c_avail < 0:
                 if not has_active_restock:
-                    decision_instruction = f"🚨 爆单断货无翻单(现总可销{int(c_avail)}件) ➔ 紧急启动翻单跟进/评估截单"
+                    decision_instruction = f"🚨 爆单断货无翻单(现总可销{int(c_avail)}件) ➔ 紧急启动翻单跟进/评估截单{ex_notice}"
                     priority = 1
                     status_level = 'danger'
                 else:
-                    decision_instruction = f"⚡ 爆单负库存在途(在途{total_active_restock}件/{delivery_str}到) ➔ 催促工厂加急交期"
+                    decision_instruction = f"⚡ 爆单负库存在途(在途{total_active_restock}件/{delivery_str}到) ➔ 催促工厂加急交期{ex_notice}"
                     priority = 2
                     status_level = 'warning_in_transit'
             elif c_avail < 30:
                 if not has_active_restock:
-                    decision_instruction = f"⚠️ 爆单库存告急(现总可销{int(c_avail)}件) ➔ 提前备料准备翻单"
+                    decision_instruction = f"⚠️ 爆单库存告急(现总可销{int(c_avail)}件) ➔ 提前备料准备翻单{ex_notice}"
                     priority = 3
                     status_level = 'warning'
                 else:
-                    decision_instruction = f"🟡 爆单库存告急(现总可销{int(c_avail)}件/在途{total_active_restock}件) ➔ 关注入库交期"
+                    decision_instruction = f"🟡 爆单库存告急(现总可销{int(c_avail)}件/在途{total_active_restock}件) ➔ 关注入库交期{ex_notice}"
                     priority = 4
                     status_level = 'notice'
             else:
-                decision_instruction = f"📈 爆款正常消耗(现总可销{int(c_avail)}件充沛) ➔ 正常销售监控"
+                decision_instruction = f"📈 爆款正常消耗(现总可销{int(c_avail)}件充沛) ➔ 正常销售监控{ex_notice}"
                 priority = 5
                 status_level = 'healthy'
 
@@ -3500,6 +3666,21 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         entity   = whEntityTotal.get(skc, 0)
         main_code, item_id = get_link_details(skc[:8])
 
+        # 渠道独占解析
+        ch_tag, ch_label, ch_desc, is_exclusive = resolve_exclusive_channel_tag(
+            channel_str=d.get('channel', ''),
+            extra_remarks=d.get('extra_remarks', ''),
+            status_str=d.get('status', ''),
+            filename=d.get('source', ''),
+            product_code=skc[:8]
+        )
+        if is_exclusive:
+            if ch_tag and ch_tag not in wh_color:
+                wh_color = f"{ch_tag}{wh_color}" if wh_color else ch_tag
+            st_val = str(d.get('status', '') or '')
+            if ch_label and ch_label not in st_val:
+                d['status'] = f"{st_val} | {ch_label}" if st_val else ch_label
+
         row = [
             skc[:8], skc, wh_color,
             round(wh_total, 0),
@@ -3520,7 +3701,9 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         rn = ws1.max_row
         
         isApprox = d.get('isApprox', False)
-        if isApprox:
+        if is_exclusive:
+            fill_color = 'E1D5E7'  # 渠道独占/专供专属雅致浅紫高亮
+        elif isApprox:
             fill_color = 'FFF2CC'
         else:
             fill_color = 'FCE4D6' if wh_total < 0 else 'DAEFCE'
@@ -3542,6 +3725,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         window_legend_item,
         ('DAEFCE', '🟢 正常到货', '仓库可销正常未断货，到货计划按期推进'),
         ('FCE4D6', '🔴 缺货加急到货', '仓库负库存/缺货到货，需生产与仓库重点加急入库'),
+        ('E1D5E7', '🟣 渠道独占', '得物专供/得物买断、线下专柜、天猫专供等特定渠道专供货品，注意渠道分流'),
         ('FFF2CC', '🟡 同色系近似匹配', '原色号无翻单，基于同款号同色系参考的交期到货'),
         ('F8CBAD', '⚠️ 大货表待登', '本周微信散表最新下单，生产总表尚未同步录入，已标注对应散表日期与发起人')
     ], title="🎨 到货跟进告示板")
@@ -3787,6 +3971,21 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
             if '赠品' not in wh_color:
                 wh_color = f"[赠品]{wh_color}" if wh_color else "[赠品]"
 
+        # 渠道独占解析
+        ch_tag, ch_label, ch_desc, is_exclusive = resolve_exclusive_channel_tag(
+            channel_str=d.get('channel', ''),
+            extra_remarks=d.get('extra_remarks', ''),
+            status_str=d.get('status', ''),
+            filename=d.get('source', ''),
+            product_code=skc[:8]
+        )
+        if is_exclusive:
+            if ch_tag and ch_tag not in wh_color:
+                wh_color = f"{ch_tag}{wh_color}" if wh_color else ch_tag
+            st_val = str(d.get('status', '') or '')
+            if ch_label and ch_label not in st_val:
+                d['status'] = f"{st_val} | {ch_label}" if st_val else ch_label
+
         row = [
             skc[:8], skc, wh_color,
             round(wh_total, 0),
@@ -3805,7 +4004,10 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ws5.append(row)
         rn = ws5.max_row
         
-        fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
+        if is_exclusive:
+            fill_color = 'E1D5E7'  # 渠道独占专属雅致浅紫高亮（警示客服切勿向买家承诺现货发货）
+        else:
+            fill_color = 'E2EFDA' if wh_total >= 10 else ('FCE4D6' if wh_total < 0 else 'FFF2CC')
         for ci in range(1, len(headers5) + 1):
             cell = ws5.cell(rn, ci)
             cell.border = tb
@@ -3824,6 +4026,7 @@ def to_excel(results, neg_skcs, wh_neg_size, wh_colors_txt, unmatched, scores,
         ('E2EFDA', '🟢 浅绿标示', '仓库现货充足 (可销 ≥ 10)，下单即可正常现货发货'),
         ('FFF2CC', '🟡 暖黄标示', '仓库现货偏紧 (0 ≤ 可销 ≤ 9)，接单需关注余量，参考预计到货期'),
         ('FCE4D6', '🔴 浅红标示', '仓库缺货断货 (可销 < 0)，需引导买家预售，参考预计到货期承诺发货'),
+        ('E1D5E7', '🟣 渠道独占', '得物/线下等渠道专供货品，禁止向天猫/淘宝买家承诺现货，仅供内部供应链参考'),
         ('BDD7EE', '🚚 生产在途', '工厂已完工出货，正在物流在途或待仓库扫码上架，预计1~2天内到仓即发'),
         ('D9E1F2', '🏭 生产制造', '工厂正常排单生产中，请参考表格预计到货日期向顾客说明发货期'),
         ('C6EFCE', '✅ 已入库', '大货实物已进仓扫码，正在按订单顺序排单打包发出'),
