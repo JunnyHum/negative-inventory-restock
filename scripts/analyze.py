@@ -2352,7 +2352,7 @@ def analyze():
             # 排除非翻单类业务文件（企划表、报价表、调价表、上新表、分货表、店播表、销量表、对账表、通讯录等），防止企划表覆盖同日期的翻单表
             EXCLUDE_NON_RESTOCK_KEYWORDS = [
                 '企划', '报价', '调价', '上新', '分货', '店播', '销量', 
-                '对账', '日报', '通讯录', '寄样', '商品资料', '专供款销售'
+                '对账', '账单', '日报', '通讯录', '寄样', '商品资料', '专供款销售'
             ]
             if any(kw in basename for kw in EXCLUDE_NON_RESTOCK_KEYWORDS):
                 continue
